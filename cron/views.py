@@ -1,0 +1,120 @@
+import hmac
+import logging
+from collections import defaultdict
+
+from django.conf import settings
+from django.core.mail import send_mail
+from django.db.models import F, Max, Q
+from django.utils import timezone
+from rest_framework import views, status
+from rest_framework.permissions import BasePermission
+from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
+
+from subscriptions.models import Subscription
+
+logger = logging.getLogger(__name__)
+
+
+class HasCronSecret(BasePermission):
+    """Authenticates cron-triggered requests via `Authorization: Bearer <CRON_SECRET>`
+    instead of a user session — there's no logged-in user calling this endpoint,
+    just a scheduler (e.g. Vercel Cron hitting a path in this same deployment).
+    Unset CRON_SECRET fails closed (permission denied), matching this project's
+    other optional-feature secrets (EDGE_CHAT_WEBHOOK_SECRET etc.)."""
+
+    def has_permission(self, request, view):
+        if not settings.CRON_SECRET:
+            return False
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return False
+        provided = auth_header[len('Bearer '):]
+        return hmac.compare_digest(provided, settings.CRON_SECRET)
+
+
+class WaitlistNotifyView(views.APIView):
+    """Emails everyone on a book's waitlist (Subscription) once a new active
+    listing appears for it, then marks them notified so re-running this
+    (the scheduler may retry, or fire more than once) doesn't double-send.
+
+    GET because Vercel Cron only ever issues GET requests to the configured
+    path; POST also accepted for manual/local triggering.
+    """
+    # The `Authorization: Bearer <CRON_SECRET>` header here is not a JWT —
+    # it must not go through the project-wide JWTAuthentication (which would
+    # reject it as an invalid token with 401 before HasCronSecret ever runs).
+    authentication_classes = []
+    permission_classes = [HasCronSecret]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'cron'
+
+    def get(self, request):
+        return self._run()
+
+    def post(self, request):
+        return self._run()
+
+    def _run(self):
+        now = timezone.now()
+
+        # A subscription is "due" when the book has an active listing created
+        # after the subscription started, and after the last time this
+        # subscription was notified (or never, if notified_at is unset).
+        due = (
+            Subscription.objects
+            .select_related('user', 'book')
+            .annotate(
+                latest_active_listing_at=Max(
+                    'book__listings__created_at',
+                    filter=Q(book__listings__status='active'),
+                )
+            )
+            .filter(latest_active_listing_at__gt=F('created_at'))
+            .filter(Q(notified_at__isnull=True) | Q(latest_active_listing_at__gt=F('notified_at')))
+        )
+
+        # One email per user, even if several of their subscriptions are due —
+        # nobody wants a separate email per book.
+        by_user = defaultdict(list)
+        for sub in due:
+            by_user[sub.user].append(sub)
+
+        notified_users = 0
+        notified_subscriptions = 0
+
+        for user, subs in by_user.items():
+            book_lines = []
+            for sub in subs:
+                book_url = f"{settings.FRONTEND_URL}/book?isbn={sub.book.isbn13}" if sub.book.isbn13 else settings.FRONTEND_URL
+                book_lines.append(f"- {sub.book.title}: {book_url}")
+            books_block = "\n".join(book_lines)
+
+            subject = "CycleUni 到貨通知 / New listings for your waitlist"
+            message = (
+                f"您求書清單中的以下書籍已有新上架商品：\n\n{books_block}\n\n"
+                "登入 CycleUni 查看詳情。\n\n---\n\n"
+                f"New listings are available for books on your CycleUni waitlist:\n\n{books_block}\n\n"
+                "Log in to CycleUni to view them."
+            )
+
+            try:
+                send_mail(
+                    subject=subject,
+                    message=message,
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[user.email],
+                    fail_silently=False,
+                )
+            except Exception:
+                logger.exception("Failed to send waitlist notification to user %s", user.id)
+                continue
+
+            Subscription.objects.filter(id__in=[s.id for s in subs]).update(notified_at=now)
+            notified_users += 1
+            notified_subscriptions += len(subs)
+
+        return Response({
+            "notified_users": notified_users,
+            "notified_subscriptions": notified_subscriptions,
+        }, status=status.HTTP_200_OK)

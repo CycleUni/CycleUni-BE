@@ -1,0 +1,22 @@
+from django.db import models
+
+class Book(models.Model):
+    SOURCE_CHOICES = [
+        ('listed', 'Listed'),
+        ('preseed', 'Preseed'),
+        ('manual', 'Manual'),
+        ('google_api', 'Google Books API'),
+        ('openlibrary_api', 'Open Library API'),
+    ]
+
+    isbn13 = models.CharField(max_length=13, unique=True, null=True, blank=True)
+    title = models.CharField(max_length=255)
+    authors = models.CharField(max_length=512, blank=True)
+    publisher = models.CharField(max_length=255, blank=True)
+    published_date = models.CharField(max_length=50, blank=True)
+    cover_url = models.URLField(max_length=1024, blank=True)
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.title} ({self.isbn13 or 'No ISBN'})"

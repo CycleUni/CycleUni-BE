@@ -1,0 +1,35 @@
+from django.urls import path
+
+from .views import (
+    AdminListingDetailView,
+    AdminListingListView,
+    AdminOrderDetailView,
+    AdminOrderForceCancelView,
+    AdminOrderListView,
+    AdminUserDetailView,
+    AdminUserListView,
+    AdminManagerToggleView,
+    AdminSchoolListView,
+    AdminSchoolDetailView,
+    AdminCategoryListView, 
+    AdminCategoryDetailView,
+    AdminSchoolBulkImportView,
+    AdminCategoryBulkImportView,
+)
+
+urlpatterns = [
+    path('users/', AdminUserListView.as_view(), name='admin-user-list'),
+    path('users/<int:pk>/', AdminUserDetailView.as_view(), name='admin-user-detail'),
+    path('managers/<int:pk>/toggle/', AdminManagerToggleView.as_view(), name='admin-manager-toggle'),
+    path('listings/', AdminListingListView.as_view(), name='admin-listing-list'),
+    path('listings/<uuid:pk>/', AdminListingDetailView.as_view(), name='admin-listing-detail'),
+    path('orders/', AdminOrderListView.as_view(), name='admin-order-list'),
+    path('orders/<uuid:pk>/', AdminOrderDetailView.as_view(), name='admin-order-detail'),
+    path('orders/<uuid:pk>/force_cancel/', AdminOrderForceCancelView.as_view(), name='admin-order-force-cancel'),
+    path('schools/', AdminSchoolListView.as_view(), name='admin-school-list'),
+    path('schools/bulk/', AdminSchoolBulkImportView.as_view(), name='admin-school-bulk'),
+    path('schools/<int:pk>/', AdminSchoolDetailView.as_view(), name='admin-school-detail'),
+    path('categories/', AdminCategoryListView.as_view(), name='admin-categories-list'),
+    path('categories/bulk/', AdminCategoryBulkImportView.as_view(), name='admin-categories-bulk'),
+    path('categories/<int:pk>/', AdminCategoryDetailView.as_view(), name='admin-categories-detail'),
+]
