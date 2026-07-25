@@ -12,6 +12,7 @@ from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 
 from accounts.models import School, User
+from accounts.views import invalidate_home_static_cache
 from core.models import AuditEvent, Category
 from listings.models import Listing
 from orders.models import Order
@@ -306,6 +307,10 @@ class AdminSchoolListView(generics.ListCreateAPIView):
     pagination_class = PageNumberPagination
     queryset = School.objects.all().order_by('id')
 
+    def perform_create(self, serializer):
+        serializer.save()
+        invalidate_home_static_cache()
+
 
 class AdminSchoolDetailView(generics.RetrieveUpdateDestroyAPIView):
     """GET / PATCH / DELETE /api/v1/admin/schools/<id>/"""
@@ -313,6 +318,14 @@ class AdminSchoolDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = AdminSchoolSerializer
     queryset = School.objects.all()
     http_method_names = ['get', 'patch', 'delete']
+
+    def perform_update(self, serializer):
+        serializer.save()
+        invalidate_home_static_cache()
+
+    def perform_destroy(self, instance):
+        instance.delete()
+        invalidate_home_static_cache()
 
 
 class AdminSchoolBulkImportView(views.APIView):
@@ -364,7 +377,10 @@ class AdminSchoolBulkImportView(views.APIView):
                         existing.save()
                 else:
                     unchanged_items.append(item)
-                    
+
+        if action == 'apply' and (new_items or modified_items):
+            invalidate_home_static_cache()
+
         return Response({
             "new": new_items,
             "modified": modified_items,
@@ -376,9 +392,13 @@ class AdminCategoryListView(generics.ListCreateAPIView):
     serializer_class = AdminCategorySerializer
     permission_classes = [IsAdminUser]
     pagination_class = PageNumberPagination
-    
+
     def get_queryset(self):
         return Category.objects.all().order_by('sort_order', 'id')
+
+    def perform_create(self, serializer):
+        serializer.save()
+        invalidate_home_static_cache()
 
 
 class AdminCategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -386,6 +406,14 @@ class AdminCategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = AdminCategorySerializer
     permission_classes = [IsAdminUser]
     http_method_names = ['get', 'patch', 'delete']
+
+    def perform_update(self, serializer):
+        serializer.save()
+        invalidate_home_static_cache()
+
+    def perform_destroy(self, instance):
+        instance.delete()
+        invalidate_home_static_cache()
 
 
 class AdminCategoryBulkImportView(views.APIView):
@@ -451,7 +479,10 @@ class AdminCategoryBulkImportView(views.APIView):
                         existing.save()
                 else:
                     unchanged_items.append(item)
-                    
+
+        if action == 'apply' and (new_items or modified_items):
+            invalidate_home_static_cache()
+
         return Response({
             "new": new_items,
             "modified": modified_items,

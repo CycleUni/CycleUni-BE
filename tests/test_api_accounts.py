@@ -9,8 +9,10 @@ from django.test import Client
 
 from accounts.services import (
     REFRESH_ROTATION_GRACE,
+    REFRESH_TOKEN_LIFETIME,
     issue_tokens,
     revoke_all_tokens_for_user,
+    verify_and_revoke_refresh_token,
 )
 from catalog.models import Book
 from listings.models import Listing
@@ -229,6 +231,38 @@ def test_refresh_rotates_tokens(api, user):
     assert resp.status_code == 200
     new_pair = resp.json()
     assert new_pair["refresh"] != tokens["refresh"]
+
+
+def test_rotation_keeps_user_token_set_alive_for_full_lifetime(user):
+    # Regression test: verify_and_revoke_refresh_token used to rewrite
+    # jwt:user:{id} via cache.set() with no explicit timeout, silently
+    # falling back to Django's cache default (300s) instead of the 14-day
+    # refresh-token lifetime. That let the tracking set expire long before
+    # the individual jwt:rt:{jti} entries it's meant to enumerate, so
+    # revoke_all_tokens_for_user() (log out all devices / password reset)
+    # would see an empty list and revoke nothing still-active elsewhere.
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    tokens_a = issue_tokens(user)
+    issue_tokens(user)  # a second device/session for the same user
+
+    jti_a = RefreshToken(tokens_a["refresh"])["jti"]
+
+    with mock.patch("accounts.services.cache.set", wraps=cache.set) as set_spy:
+        assert verify_and_revoke_refresh_token(jti_a, user.id) is True
+
+    user_set_calls = [
+        call for call in set_spy.call_args_list
+        if call.args[0] == f"jwt:user:{user.id}"
+    ]
+    assert user_set_calls, "expected jwt:user:{id} to be rewritten on rotation"
+    for call in user_set_calls:
+        timeout = call.kwargs.get("timeout") if "timeout" in call.kwargs else (
+            call.args[2] if len(call.args) > 2 else None
+        )
+        assert timeout is not None
+        assert timeout > 300  # must outlive Django's cache default
+        assert timeout <= int(REFRESH_TOKEN_LIFETIME.total_seconds())
 
 
 def test_refresh_concurrent_reuse_within_grace_returns_same_pair(api, user):

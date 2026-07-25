@@ -704,12 +704,28 @@ class UnbindEduEmailView(views.APIView):
         return Response({"code": "acct.unbindSuccess"})
 
 
+# The only two languages the frontend ever requests (see
+# CycleUni-FE/src/app/core/i18n.service.ts) — kept in sync manually since
+# `translations` fields accept arbitrary language tags, but the UI itself
+# only ever renders these two, so only these two cache entries can exist.
+HOME_STATIC_CACHE_LANGUAGES = ('en', 'zh-TW')
+
+
+def invalidate_home_static_cache():
+    """Bust HomeMetadataView's 24h schools/categories cache. Call this
+    anywhere a School or Category row is created, updated, deleted, or
+    bulk-imported (adminapi.views) — otherwise admin changes don't show up
+    on the homepage for up to 24 hours."""
+    for lang in HOME_STATIC_CACHE_LANGUAGES:
+        cache.delete(f"home_static_{lang}")
+
+
 class HomeMetadataView(views.APIView):
     """
     Home page metadata (schools, categories, and most wanted books).
 
-    This view depends on `accounts.School` and `subscriptions.Subscription`. It is placed in 
-    the `accounts` app instead of `core` to avoid circular dependencies and keep `core` 
+    This view depends on `accounts.School` and `subscriptions.Subscription`. It is placed in
+    the `accounts` app instead of `core` to avoid circular dependencies and keep `core`
     as an independent module. The URL remains `/api/v1/core/metadata/`.
     """
     permission_classes = [AllowAny]

@@ -75,12 +75,18 @@ def verify_and_revoke_refresh_token(jti, user_id):
     # Revoke the old token
     cache.delete(cache_key)
 
-    # Remove the JTI from the user's token collection
+    # Remove the JTI from the user's token collection. Re-extend the set's
+    # own TTL to the full refresh-token lifetime on every write — omitting
+    # `timeout` here would fall back to Django's cache default (300s),
+    # silently expiring this tracking key long before the individual
+    # `jwt:rt:{jti}` entries it's meant to enumerate, which would make
+    # revoke_all_tokens_for_user() (log out all devices / password reset)
+    # see an empty list and revoke nothing.
     user_set_key = f"jwt:user:{user_id}"
     current_tokens = cache.get(user_set_key, [])
     if jti in current_tokens:
         current_tokens.remove(jti)
-        cache.set(user_set_key, current_tokens)
+        cache.set(user_set_key, current_tokens, timeout=int(REFRESH_TOKEN_LIFETIME.total_seconds()))
 
     return True
 
