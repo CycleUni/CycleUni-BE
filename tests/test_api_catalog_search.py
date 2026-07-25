@@ -242,6 +242,35 @@ def test_search_google_books_returns_empty_on_error(db):
         assert search_google_books("anything") == []
 
 
+def test_search_google_books_degrades_gracefully_on_cache_backend_error(db):
+    # A Redis hiccup (timeout, connection reset) must not crash the request —
+    # this cache is a performance optimization over Google Books, not a
+    # correctness requirement, so a broken cache should just behave like a
+    # cold one and still serve a live result.
+    with mock.patch("catalog.services.cache.get", side_effect=ConnectionError("redis unreachable")), \
+            mock.patch("catalog.services.cache.set", side_effect=ConnectionError("redis unreachable")), \
+            mock.patch("catalog.services.requests.get", return_value=_fake_response(GOOGLE_PAYLOAD)):
+        results = search_google_books("fetched")
+    assert results == [
+        {
+            "title": "Fetched Book",
+            "authors": "Author One, Author Two",
+            "publisher": "Pub",
+            "published_date": "2020",
+            "cover_url": "https://covers.invalid/x.jpg",
+            "isbn": "9784444444444",
+        }
+    ]
+
+
+def test_get_google_books_by_isbn_degrades_gracefully_on_cache_backend_error(db):
+    with mock.patch("catalog.services.cache.get", side_effect=ConnectionError("redis unreachable")), \
+            mock.patch("catalog.services.cache.set", side_effect=ConnectionError("redis unreachable")), \
+            mock.patch("catalog.services.requests.get", return_value=_fake_response(GOOGLE_PAYLOAD)):
+        result = get_google_books_by_isbn("9784444444444")
+    assert result["title"] == "Fetched Book"
+
+
 # ---------------------------------------------------------------------
 # Search endpoint (Google results mocked, local enrichment real)
 # ---------------------------------------------------------------------

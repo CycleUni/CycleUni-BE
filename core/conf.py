@@ -101,6 +101,19 @@ def resolve_cache_config(env, *, debug):
         return {
             "BACKEND": "django.core.cache.backends.redis.RedisCache",
             "LOCATION": redis_url,
+            # Without an explicit socket timeout, a slow/hanging TCP handshake
+            # to Upstash (common for a cold serverless function reconnecting
+            # from a fresh container) blocks indefinitely — on Vercel that
+            # means the whole function runs past its execution time limit and
+            # gets killed by the platform, which the browser sees as a bare
+            # net::ERR_FAILED with no HTTP response at all (intermittent,
+            # "works on refresh"). A short timeout makes a bad connection
+            # fail fast as a normal exception instead.
+            "OPTIONS": {
+                "socket_timeout": 3,
+                "socket_connect_timeout": 3,
+                "retry_on_timeout": True,
+            },
         }
     _guard_dev_fallback(
         "REDIS_URL",

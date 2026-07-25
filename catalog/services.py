@@ -41,6 +41,29 @@ _NOT_FOUND_SENTINEL = "__gb_not_found__"
 _NOT_FOUND_CACHE_TTL = 3600  # 1 hour
 
 
+def _safe_cache_get(key):
+    """cache.get() that degrades to a plain cache miss on a Redis hiccup
+    (timeout, connection reset) instead of crashing the whole request — this
+    cache is purely a performance optimization over Google/Open Library, not
+    a correctness requirement, so callers should keep working live when it's
+    unavailable rather than surfacing a 500."""
+    try:
+        return cache.get(key)
+    except Exception:
+        logger.exception("Cache backend error on get(%s); treating as a miss", key)
+        return None
+
+
+def _safe_cache_set(key, value, timeout):
+    """cache.set() that swallows a Redis hiccup instead of crashing the
+    request — see `_safe_cache_get`. Losing this write just means the next
+    lookup re-fetches live, which is the same outcome as a cold cache."""
+    try:
+        cache.set(key, value, timeout=timeout)
+    except Exception:
+        logger.exception("Cache backend error on set(%s); continuing without caching", key)
+
+
 def describe_source(engine, cache_hit):
     """Human-readable provenance label for developer monitoring only (not
     shown in the UI, not the persisted Book.source enum) — distinguishes a
@@ -59,7 +82,7 @@ def _google_books_params(query):
 
 def get_google_books_by_isbn(isbn, _meta=None):
     cache_key = f"gb:isbn:{isbn}"
-    cached = cache.get(cache_key)
+    cached = _safe_cache_get(cache_key)
     if cached is not None:
         if _meta is not None:
             _meta['cache_hit'] = True
@@ -102,10 +125,10 @@ def get_google_books_by_isbn(isbn, _meta=None):
                     'isbn': isbn,
                 }
                 # cache for 30 days
-                cache.set(cache_key, json.dumps(result), timeout=86400 * 30)
+                _safe_cache_set(cache_key, json.dumps(result), 86400 * 30)
                 return result
             # Confirmed zero results: negatively cache for a shorter TTL.
-            cache.set(cache_key, _NOT_FOUND_SENTINEL, timeout=_NOT_FOUND_CACHE_TTL)
+            _safe_cache_set(cache_key, _NOT_FOUND_SENTINEL, _NOT_FOUND_CACHE_TTL)
     except (requests.RequestException, ValueError, KeyError):
         logger.exception("Google Books ISBN lookup failed for %s", isbn)
     return None
@@ -114,7 +137,7 @@ def get_google_books_by_isbn(isbn, _meta=None):
 def search_google_books(query, _meta=None):
     query_hash = hashlib.sha1(query.encode('utf-8')).hexdigest()
     cache_key = f"gb:q:{query_hash}"
-    cached = cache.get(cache_key)
+    cached = _safe_cache_get(cache_key)
     if cached is not None:
         if _meta is not None:
             _meta['cache_hit'] = True
@@ -149,7 +172,7 @@ def search_google_books(query, _meta=None):
             items = data.get('items', [])
             if not items:
                 # Confirmed zero results: negatively cache for a shorter TTL.
-                cache.set(cache_key, _NOT_FOUND_SENTINEL, timeout=_NOT_FOUND_CACHE_TTL)
+                _safe_cache_set(cache_key, _NOT_FOUND_SENTINEL, _NOT_FOUND_CACHE_TTL)
                 return []
             results = []
             for item in items[:10]:
@@ -163,7 +186,7 @@ def search_google_books(query, _meta=None):
                     'isbn': next((id['identifier'] for id in info.get('industryIdentifiers', []) if id['type'] == 'ISBN_13'), None)
                 })
             # cache for 24 hours
-            cache.set(cache_key, json.dumps(results), timeout=86400)
+            _safe_cache_set(cache_key, json.dumps(results), 86400)
             return results
     except (requests.RequestException, ValueError, KeyError):
         logger.exception("Google Books search failed for query %r", query)
@@ -175,7 +198,7 @@ def get_open_library_book_by_isbn(isbn, _meta=None):
     automatic fallback when Google Books rate-limits us (429), or when the
     caller explicitly picks Open Library as the search engine."""
     cache_key = f"ol:isbn:{isbn}"
-    cached = cache.get(cache_key)
+    cached = _safe_cache_get(cache_key)
     if cached is not None:
         if _meta is not None:
             _meta['cache_hit'] = True
@@ -200,7 +223,7 @@ def get_open_library_book_by_isbn(isbn, _meta=None):
             data = response.json()
             entry = data.get(f"ISBN:{isbn}")
             if not entry:
-                cache.set(cache_key, _NOT_FOUND_SENTINEL, timeout=_NOT_FOUND_CACHE_TTL)
+                _safe_cache_set(cache_key, _NOT_FOUND_SENTINEL, _NOT_FOUND_CACHE_TTL)
                 return None
             result = {
                 'title': entry.get('title', ''),
@@ -210,7 +233,7 @@ def get_open_library_book_by_isbn(isbn, _meta=None):
                 'cover_url': entry.get('cover', {}).get('medium', ''),
                 'isbn': isbn,
             }
-            cache.set(cache_key, json.dumps(result), timeout=86400 * 30)
+            _safe_cache_set(cache_key, json.dumps(result), 86400 * 30)
             return result
     except (requests.RequestException, ValueError, KeyError):
         logger.exception("Open Library ISBN lookup failed for %s", isbn)
@@ -221,7 +244,7 @@ def search_open_library_books(query, _meta=None):
     """Open Library equivalent of `search_google_books`."""
     query_hash = hashlib.sha1(query.encode('utf-8')).hexdigest()
     cache_key = f"ol:q:{query_hash}"
-    cached = cache.get(cache_key)
+    cached = _safe_cache_get(cache_key)
     if cached is not None:
         if _meta is not None:
             _meta['cache_hit'] = True
@@ -250,7 +273,7 @@ def search_open_library_books(query, _meta=None):
             data = response.json()
             docs = data.get('docs', [])[:10]
             if not docs:
-                cache.set(cache_key, _NOT_FOUND_SENTINEL, timeout=_NOT_FOUND_CACHE_TTL)
+                _safe_cache_set(cache_key, _NOT_FOUND_SENTINEL, _NOT_FOUND_CACHE_TTL)
                 return []
             results = []
             for doc in docs:
@@ -270,7 +293,7 @@ def search_open_library_books(query, _meta=None):
                     'isbn': isbn13,
                 })
             # cache for 24 hours, matching search_google_books
-            cache.set(cache_key, json.dumps(results), timeout=86400)
+            _safe_cache_set(cache_key, json.dumps(results), 86400)
             return results
     except (requests.RequestException, ValueError, KeyError):
         logger.exception("Open Library search failed for query %r", query)

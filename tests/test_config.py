@@ -241,6 +241,19 @@ def test_full_env_builds_mailjet_email_backend():
     assert settings.ANYMAIL["MAILJET_SECRET_KEY"] == "test-only-mailjet-secret-key"
 
 
+def test_redis_cache_has_socket_timeouts_configured():
+    # Without an explicit socket timeout, a slow/hanging connection to a
+    # serverless-hostile Redis endpoint (e.g. Upstash from a cold Vercel
+    # function) blocks until the platform kills the whole request — this
+    # must fail fast instead (see core/conf.py resolve_cache_config).
+    settings = load_settings(FULL_ENV)  # DEBUG=False, REDIS_URL present
+    cache_config = settings.CACHES["default"]
+    assert cache_config["BACKEND"] == "django.core.cache.backends.redis.RedisCache"
+    options = cache_config["OPTIONS"]
+    assert options["socket_timeout"] <= 5
+    assert options["socket_connect_timeout"] <= 5
+
+
 def test_prod_enforces_https_and_secure_cookies():
     settings = load_settings(FULL_ENV)  # DEBUG=False
     assert settings.SECURE_SSL_REDIRECT is True
