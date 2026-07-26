@@ -13,6 +13,7 @@ from catalog.services import (
     get_google_books_by_isbn, search_google_books,
     get_open_library_book_by_isbn, search_open_library_books,
     GoogleBooksRateLimited, describe_source,
+    _NOT_FOUND_CACHE_TTL,
 )
 from listings.models import Listing
 from subscriptions.models import Subscription
@@ -437,6 +438,53 @@ def test_search_google_books_raises_on_429(db):
     with mock.patch("catalog.services.requests.get", return_value=_fake_response({}, status_code=429)):
         with pytest.raises(GoogleBooksRateLimited):
             search_google_books("rate limited query")
+
+
+def test_429_short_circuits_further_google_calls_for_10_seconds(db):
+    # A 429 is a property of the whole API key/quota, not of one query — once
+    # we've seen it, any *other* ISBN/query lookup within the short window
+    # must also skip straight to raising (and thus to the Open Library
+    # fallback) instead of burning another live call against Google that
+    # would just get rate-limited again.
+    with mock.patch("catalog.services.requests.get", return_value=_fake_response({}, status_code=429)) as get:
+        with pytest.raises(GoogleBooksRateLimited):
+            search_google_books("first query that gets 429")
+        assert get.call_count == 1
+
+        with pytest.raises(GoogleBooksRateLimited):
+            get_google_books_by_isbn("9781111111112")  # unrelated ISBN
+        # No second live call — short-circuited by the cached rate-limit flag.
+        assert get.call_count == 1
+
+
+def test_google_rate_limit_flag_cached_for_10_seconds_not_1_hour(db):
+    with mock.patch("catalog.services.requests.get", return_value=_fake_response({}, status_code=429)), \
+            mock.patch("catalog.services.cache.set", wraps=cache.set) as set_spy:
+        with pytest.raises(GoogleBooksRateLimited):
+            search_google_books("rate limited ttl check")
+
+    rate_limit_calls = [
+        call for call in set_spy.call_args_list
+        if call.args[0] == "gb:rate_limited"
+    ]
+    assert rate_limit_calls, "expected the rate-limit flag to be cached"
+    assert rate_limit_calls[0].kwargs.get("timeout") == 10
+
+
+def test_confirmed_not_found_still_uses_the_1_hour_cache_unaffected(db):
+    # Sanity check that the new short-lived rate-limit flag is a completely
+    # separate mechanism from the existing "confirmed zero results" cache —
+    # a genuine empty result must still get the full negative-cache TTL.
+    with mock.patch("catalog.services.requests.get", return_value=_fake_response({"totalItems": 0, "items": []})), \
+            mock.patch("catalog.services.cache.set", wraps=cache.set) as set_spy:
+        assert search_google_books("truly no results query") == []
+
+    not_found_calls = [
+        call for call in set_spy.call_args_list
+        if call.args[0].startswith("gb:q:")
+    ]
+    assert not_found_calls
+    assert not_found_calls[0].kwargs.get("timeout") == _NOT_FOUND_CACHE_TTL
 
 
 def test_search_endpoint_falls_back_to_open_library_on_google_429(api, db):

@@ -37,8 +37,21 @@ _NOT_FOUND_SENTINEL = "__gb_not_found__"
 
 # Negative-result cache TTL: shorter than the positive-hit TTLs so a book
 # later added to Google's catalog is eventually rediscovered, while repeated
-# no-op queries in the short term don't re-hit the API.
+# no-op queries in the short term don't re-hit the API. This is distinct from
+# _GOOGLE_RATE_LIMIT_TTL below — one caches "we confirmed this book doesn't
+# exist", the other caches "Google is rate-limiting us right now" — very
+# different facts with very different appropriate lifetimes.
 _NOT_FOUND_CACHE_TTL = 3600  # 1 hour
+
+# When Google Books responds 429, remember it for a short window so the next
+# request (for any ISBN/query) skips straight to the fallback instead of
+# immediately re-hitting Google and getting rate-limited again — 429s are a
+# property of the whole API key/quota, not of any one query, so this is a
+# single global flag rather than per-query. Short on purpose: a rate limit
+# is usually transient, so we want to start trying Google again soon rather
+# than staying on the fallback for as long as a real "not found" result.
+_GOOGLE_RATE_LIMIT_CACHE_KEY = "gb:rate_limited"
+_GOOGLE_RATE_LIMIT_TTL = 10  # seconds
 
 
 def _safe_cache_get(key):
@@ -94,6 +107,10 @@ def get_google_books_by_isbn(isbn, _meta=None):
     if _meta is not None:
         _meta['cache_hit'] = False
 
+    if _safe_cache_get(_GOOGLE_RATE_LIMIT_CACHE_KEY):
+        logger.debug("Google Books known rate-limited (cached); skipping live call for isbn=%s", isbn)
+        raise GoogleBooksRateLimited(f"cached rate-limit, isbn={isbn}")
+
     params = _google_books_params(f"isbn:{isbn}")
     debug_params = params.copy()
     if 'key' in debug_params:
@@ -109,6 +126,7 @@ def get_google_books_by_isbn(isbn, _meta=None):
         logger.debug("Google Books ISBN lookup response status=%s", response.status_code)
         if response.status_code == 429:
             logger.warning("Google Books rate-limited (429) for ISBN %s", isbn)
+            _safe_cache_set(_GOOGLE_RATE_LIMIT_CACHE_KEY, True, _GOOGLE_RATE_LIMIT_TTL)
             raise GoogleBooksRateLimited(f"429 for isbn={isbn}")
         if response.status_code != 200:
             logger.debug("Google Books ISBN lookup response body: %s", response.text)
@@ -149,6 +167,10 @@ def search_google_books(query, _meta=None):
     if _meta is not None:
         _meta['cache_hit'] = False
 
+    if _safe_cache_get(_GOOGLE_RATE_LIMIT_CACHE_KEY):
+        logger.debug("Google Books known rate-limited (cached); skipping live call for query=%r", query)
+        raise GoogleBooksRateLimited(f"cached rate-limit, query={query!r}")
+
     params = _google_books_params(query)
     debug_params = params.copy()
     if 'key' in debug_params:
@@ -164,6 +186,7 @@ def search_google_books(query, _meta=None):
         logger.debug("Google Books search response status=%s", response.status_code)
         if response.status_code == 429:
             logger.warning("Google Books rate-limited (429) for query %r", query)
+            _safe_cache_set(_GOOGLE_RATE_LIMIT_CACHE_KEY, True, _GOOGLE_RATE_LIMIT_TTL)
             raise GoogleBooksRateLimited(f"429 for query={query!r}")
         if response.status_code != 200:
             logger.debug("Google Books search response body: %s", response.text)
