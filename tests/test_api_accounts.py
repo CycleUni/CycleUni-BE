@@ -70,6 +70,33 @@ def test_register_success(api, db):
     assert User.objects.filter(email="new@example.com").exists()
 
 
+def test_register_stores_email_fully_lowercased(api, db):
+    # Django's normalize_email only lowercases the domain part — the local
+    # part must also be normalized here, or this exact account becomes
+    # unreachable by a plain-lowercase login/password-reset attempt later.
+    api.post(
+        "/api/v1/auth/register/",
+        {"email": "MixedCase3@Example.com", "password": PASSWORD, "first_name": "Mixed", "last_name": "Case"},
+        content_type="application/json",
+    )
+    assert User.objects.filter(email="mixedcase3@example.com").exists()
+
+
+def test_register_rejects_case_variant_duplicate_email(api, db):
+    api.post(
+        "/api/v1/auth/register/",
+        {"email": "Dup@example.com", "password": PASSWORD, "first_name": "First", "last_name": "User"},
+        content_type="application/json",
+    )
+    resp = api.post(
+        "/api/v1/auth/register/",
+        {"email": "dup@example.com", "password": PASSWORD, "first_name": "Second", "last_name": "User"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["fields"]["email"][0] == "acct.errEmailTaken"
+
+
 def test_register_validation_error(api, db):
     resp = api.post(
         "/api/v1/auth/register/",
@@ -204,6 +231,22 @@ def test_login_unknown_email_same_response_as_wrong_password(api, db):
     assert resp.json()["error"]["code"] == "auth.errInvalidCredentials"
 
 
+def test_login_succeeds_with_different_email_case(api, db):
+    # Django's normalize_email only lowercases the domain part, not the local
+    # part, so an account registered with any capitalization must still be
+    # findable by a plain-lowercase (or any-case) retype at login — nobody
+    # expects email lookups to be case-sensitive.
+    User.objects.create_user(
+        email="MixedCase@example.com", first_name="Mixed", last_name="Case", password=PASSWORD
+    )
+    resp = api.post(
+        "/api/v1/auth/token/",
+        {"email": "mixedcase@example.com", "password": PASSWORD},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+
+
 def test_login_disabled_account(api, user):
     user.is_active = False
     user.save(update_fields=["is_active"])
@@ -219,6 +262,57 @@ def test_login_disabled_account(api, user):
 # ---------------------------------------------------------------------
 # Refresh (rotation + grace period)
 # ---------------------------------------------------------------------
+
+
+def test_refresh_succeeds_repeatedly_without_forcing_relogin(api, user):
+    # Regression test for the actual bug behind "logged out constantly,
+    # locally and in production": simplejwt's RefreshToken.for_user() always
+    # stores the user_id claim as str(user.id) (see
+    # rest_framework_simplejwt.tokens.RefreshToken.for_user), but
+    # issue_tokens used to cache the raw int user.id. RefreshTokenView reads
+    # the claim back as a string and compared it against that cached int —
+    # `"1" != 1` on literally every refresh — which verify_and_revoke_refresh_
+    # token treated as proof of token reuse/theft and revoked every session.
+    # Chained refreshes (as any real session does many times over its life)
+    # must keep succeeding, not fail on the very first one.
+    tokens = issue_tokens(user)
+    for _ in range(3):
+        resp = api.post(
+            "/api/v1/auth/refresh/",
+            {"refresh": tokens["refresh"]},
+            content_type="application/json",
+        )
+        assert resp.status_code == 200
+        tokens = resp.json()
+
+
+def test_cache_miss_on_refresh_does_not_revoke_other_sessions(api, user):
+    # A bare "not found" for one device's refresh token (evicted, or a local
+    # dev-server restart wiping LocMemCache) must fail only that one refresh
+    # — it must NOT cascade into logging out every other device/tab, which
+    # was the second half of the same bug: any cache hiccup was treated as
+    # definitive proof of theft.
+    tokens_a = issue_tokens(user)  # device A
+    tokens_b = issue_tokens(user)  # device B, still valid
+
+    from rest_framework_simplejwt.tokens import RefreshToken
+    jti_a = RefreshToken(tokens_a["refresh"])["jti"]
+    cache.delete(f"jwt:rt:{jti_a}")  # simulate an operational cache miss for device A only
+
+    resp_a = api.post(
+        "/api/v1/auth/refresh/",
+        {"refresh": tokens_a["refresh"]},
+        content_type="application/json",
+    )
+    assert resp_a.status_code == 401
+
+    # Device B must be completely unaffected.
+    resp_b = api.post(
+        "/api/v1/auth/refresh/",
+        {"refresh": tokens_b["refresh"]},
+        content_type="application/json",
+    )
+    assert resp_b.status_code == 200
 
 
 def test_refresh_rotates_tokens(api, user):
@@ -249,7 +343,10 @@ def test_rotation_keeps_user_token_set_alive_for_full_lifetime(user):
     jti_a = RefreshToken(tokens_a["refresh"])["jti"]
 
     with mock.patch("accounts.services.cache.set", wraps=cache.set) as set_spy:
-        assert verify_and_revoke_refresh_token(jti_a, user.id) is True
+        # user_id is compared against the whitelist as a string, matching
+        # simplejwt's own str(user.id) claim (see issue_tokens) — not the
+        # raw int PK.
+        assert verify_and_revoke_refresh_token(jti_a, str(user.id)) is True
 
     user_set_calls = [
         call for call in set_spy.call_args_list
@@ -567,6 +664,26 @@ def test_request_password_reset_sends_email_for_known_user(api, user, mailoutbox
     assert resp.json()["code"] == "acct.passwordResetSent"
     assert len(mailoutbox) == 1
     assert user.email in mailoutbox[0].to[0]
+
+
+def test_request_password_reset_sends_email_regardless_of_input_case(api, db, mailoutbox):
+    # Regression test for the actual bug behind "forgot password doesn't
+    # work, no email arrives" in production: this view always returns the
+    # same generic success response whether or not the account exists (by
+    # design, so it can't be used to probe registered emails) — which meant
+    # a case mismatch between the stored account email and whatever case the
+    # user retyped was completely silent. Nothing looked broken; the email
+    # was simply never sent because the exact-match lookup found no account.
+    User.objects.create_user(
+        email="MixedCase2@example.com", first_name="Mixed", last_name="Case", password=PASSWORD
+    )
+    resp = api.post(
+        "/api/v1/auth/password/reset/request/", {"email": "mixedcase2@example.com"}, content_type="application/json",
+    )
+    assert resp.status_code == 200
+    assert resp.json()["code"] == "acct.passwordResetSent"
+    assert len(mailoutbox) == 1
+    assert mailoutbox[0].to[0] == "MixedCase2@example.com"
 
 
 def test_request_password_reset_same_response_for_unknown_email(api, db, mailoutbox):

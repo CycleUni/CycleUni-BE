@@ -53,8 +53,14 @@ from rest_framework.validators import UniqueValidator
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
+    # iexact: Django's own normalize_email only lowercases the domain part,
+    # not the local part, so an exact-match uniqueness check would let
+    # "User@x.com" and "user@x.com" both register — email lookups elsewhere
+    # (login, forgot-password) are case-insensitive, matching normal user
+    # expectations, so uniqueness must be enforced the same way or two
+    # "different" accounts could exist that no login/reset flow can tell apart.
     email = serializers.EmailField(
-        validators=[UniqueValidator(queryset=User.objects.all(), message='acct.errEmailTaken')]
+        validators=[UniqueValidator(queryset=User.objects.all(), lookup='iexact', message='acct.errEmailTaken')]
     )
 
     class Meta:
@@ -69,7 +75,12 @@ class RegisterSerializer(serializers.ModelSerializer):
         # (GoogleLoginView) that never sets is_active=False, since Google
         # has already verified that email address.
         user = User.objects.create_user(
-            email=validated_data['email'],
+            # Lowercase the whole address (not just the domain, which is all
+            # Django's own normalize_email does) so it's stored the same way
+            # login/forgot-password will look it up — see the UniqueValidator
+            # comment above for why leaving the local part as-typed causes
+            # silent lookup mismatches later.
+            email=validated_data['email'].lower(),
             first_name=validated_data['first_name'],
             last_name=validated_data['last_name'],
             password=validated_data['password'],

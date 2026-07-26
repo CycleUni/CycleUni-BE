@@ -60,7 +60,6 @@ def _send_verification_email(subject, message, recipient_email, log_context):
             logger.debug("Sent verification email (%s), anymail status=%s", log_context, getattr(msg.anymail_status, 'status', None))
     except Exception:
         logger.exception("Failed to send verification email (%s)", log_context)
-        logger.exception("Failed to send verification email (%s) to %s", log_context, recipient_email)
 
 
 class RegisterView(views.APIView):
@@ -273,9 +272,15 @@ class LoginView(views.APIView):
 
         invalid_credentials = Response({"error": {"code": "auth.errInvalidCredentials"}}, status=status.HTTP_401_UNAUTHORIZED)
 
-        try:
-            user = User.objects.get(email=email)
-        except User.DoesNotExist:
+        # Case-insensitive: registration only lowercases the domain part
+        # (Django's normalize_email), so an account registered as
+        # "User@example.com" would otherwise only match an exact-case retype
+        # of that same address — nobody expects email lookups to be
+        # case-sensitive. .first() rather than .get() so the pre-existing
+        # (not newly introduced) possibility of two accounts differing only
+        # by case can't turn into a 500.
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
             # Run a dummy hash so response timing does not reveal whether the account exists
             User().set_password(password)
             return invalid_credentials
@@ -304,17 +309,19 @@ class RefreshTokenView(views.APIView):
             jti = token['jti']
             user_id = token['user_id']
 
-            # Reuse within the rotation grace period (concurrent refresh from
-            # multiple tabs): return the same token pair issued earlier
+            # Already rotated (concurrent refresh from multiple tabs, or a
+            # delayed replay of an old-but-still-within-lifetime token):
+            # return the same pair it was rotated into rather than erroring.
             grace_tokens = get_grace_tokens(jti, user_id)
             if grace_tokens:
                 return Response(grace_tokens)
 
-            # Whitelist check; revokes the old jti on success
+            # Whitelist check; revokes the old jti on success. A bare "not
+            # found" (cache miss, eviction, dev-server restart) fails just
+            # this one refresh — it no longer nukes every other session; see
+            # verify_and_revoke_refresh_token's docstring for why that
+            # escalation was the actual bug behind frequent unwanted logouts.
             if not verify_and_revoke_refresh_token(jti, user_id):
-                # Token was already used or revoked - this implies potential token theft.
-                # Invalidate all active sessions for this user.
-                revoke_all_tokens_for_user(user_id)
                 return Response({"error": {"code": "auth.errTokenRevoked"}}, status=status.HTTP_401_UNAUTHORIZED)
 
             user = User.objects.get(id=user_id)
@@ -463,7 +470,12 @@ class LogoutView(views.APIView):
             try:
                 token = RefreshToken(refresh_token)
                 jti = token['jti']
-                verify_and_revoke_refresh_token(jti, user_id)
+                # The whitelist stores/compares user_id as a string (matching
+                # simplejwt's own str(user.id) claim, see issue_tokens) —
+                # request.user.id is a real int, so it must be cast here or
+                # this never matches and the token silently stays whitelisted
+                # despite the user asking to log out.
+                verify_and_revoke_refresh_token(jti, str(user_id))
             except TokenError:
                 pass  # Ignore invalid tokens; we are logging out anyway
 
@@ -547,7 +559,7 @@ class MyProfileView(views.APIView):
             if email != user.email:
                 if user.socialaccount_set.filter(provider='google').exists():
                     return Response({"email": [_("You cannot change the email of a Google-linked account.")]}, status=status.HTTP_400_BAD_REQUEST)
-                if User.objects.filter(email=email).exists():
+                if User.objects.filter(email__iexact=email).exclude(pk=user.pk).exists():
                     return Response({"email": [_("Email is already in use.")]}, status=status.HTTP_400_BAD_REQUEST)
                 # A login email matching a supported school's domain is what
                 # AutoVerifyEduEmailView trusts to grant verified-student
@@ -624,11 +636,17 @@ class RequestPasswordResetView(views.APIView):
         email = request.data.get('email')
         if not email or not isinstance(email, str):
             return Response({"error": {"code": "auth.errValidation"}}, status=status.HTTP_400_BAD_REQUEST)
-        email = email.strip().lower()
+        email = email.strip()
 
-        try:
-            user = User.objects.get(email=email)
-        except User.DoesNotExist:
+        # Case-insensitive, like LoginView — registration only lowercases the
+        # domain part, so an account registered as "User@example.com" would
+        # otherwise silently fail to match a plain-lowercase retype here and
+        # this view would (by design, to avoid leaking which emails are
+        # registered) return the same generic success response with no email
+        # ever sent. That mismatch, not a Mailjet/deliverability problem, was
+        # the actual bug behind "forgot password" appearing to do nothing.
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
             return Response({"code": "acct.passwordResetSent"})
 
         # A Google-linked account has no usable password to reset — sending
