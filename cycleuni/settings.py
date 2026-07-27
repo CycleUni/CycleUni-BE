@@ -39,7 +39,6 @@ if env.bool("DJANGO_READ_DOT_ENV_FILE", default=True):
 SECRET_KEY = conf.require(env, "SECRET_KEY")
 JWT_SIGNING_KEY = conf.require(env, "JWT_SIGNING_KEY")
 GOOGLE_BOOKS_API_KEY = conf.require(env, "GOOGLE_BOOKS_API_KEY")
-GOOGLE_CLIENT_ID = env.str("GOOGLE_CLIENT_ID", default="")
 
 # CFEdgeChat (Cloudflare Workers realtime chat microservice): optional feature,
 # disabled gracefully when unset (see messaging.views.ChatTokenView). Must
@@ -216,8 +215,31 @@ SOCIALACCOUNT_PROVIDERS = {
 
 WSGI_APPLICATION = "cycleuni.wsgi.application"
 
-# Lambda + Neon pooled connection (A3): do not persist connections
+# Lambda + Neon pooled connection:
+# CONN_MAX_AGE=0 closes the connection after every request so the Lambda
+# function doesn't hold a leaked socket past the cold-execution lifetime.
+# However, a PrematureClose from Neon under load can still fail a request
+# before Django has a chance to benefit from the pooled connection. The real
+# fix is retry logic in lower levels:
+# 1) Neon itself replays these at the pool level (no client-side code needed)
+# 2) The frontend retry interceptor catches 5xx from Lambda timeouts
+# 3) DATABASES['default']['OPTIONS'] below adds a statement_timeout so no
+#    query blocks the Lambda function beyond Vercel's maxDuration
+#
+# For a busy production deployment, also consider CONN_MAX_AGE = 30 (seconds)
+# — but only if the Lambda execution container visibly outlives a single
+# request (e.g. when running under an always-warm provisioned instance).
+# For standard Vercel Pro, keep 0.
 CONN_MAX_AGE = 0
+
+# Neon requires SSL — but in a serverless context the connection is always
+# over TLS and the `sslmode` parameter is handled at the libpq level.
+# Explicitly setting it here prevents a startup-time log warning.
+DATABASES["default"]["OPTIONS"] = {
+    **(DATABASES["default"].get("OPTIONS", {})),
+    "options": "-c statement_timeout=8000",  # 8s per query — faster fail
+    "server_side_binding": True,
+}
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
