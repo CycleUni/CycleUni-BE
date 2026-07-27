@@ -91,15 +91,18 @@ class RecentBooksView(views.APIView):
         if school:
             books_qs = books_qs.filter(listings__seller__school__name=school)
             
-        limit = int(limit_param) if limit_param.isdigit() else 200
-        
         books_qs = books_qs.annotate(
             latest_listing=Max('listings__created_at')
-        ).order_by('-latest_listing')[:limit]
+        ).order_by('-latest_listing')
 
         paginator = PageNumberPagination()
         paginated_books = paginator.paginate_queryset(books_qs, request)
-        books_to_process = paginated_books if paginated_books is not None else books_qs
+        if paginated_books is not None:
+            # Slice only after pagination to maintain queryset integrity
+            limit = int(limit_param) if limit_param.isdigit() else 200
+            books_to_process = paginated_books[:limit]
+        else:
+            books_to_process = books_qs[:int(limit_param) if limit_param.isdigit() else 200]
 
         book_ids = [b.id for b in books_to_process]
         
