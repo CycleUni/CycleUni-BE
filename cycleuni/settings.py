@@ -102,6 +102,11 @@ if not CORS_ALLOW_ALL_ORIGINS and _frontend_origin not in CORS_ALLOWED_ORIGINS:
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
 
+from corsheaders.defaults import default_headers
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "ngsw-bypass",
+]
+
 # Sender address for outbound transactional email.
 _raw_from_email = env.str("DEFAULT_FROM_EMAIL", default="noreply@cycleuni.com")
 if "<" not in _raw_from_email:
