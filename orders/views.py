@@ -17,67 +17,45 @@ logger = logging.getLogger(__name__)
 def _post_edge_chat_message(conv, sender, msg_body, log_prefix):
     """JWT-sign and POST a chat message to the CFEdgeChat Durable Object.
 
-    Shared by send_order_notification and the OrderViewSet.perform_create so
+    Shared by send_order_notification and OrderViewSet.perform_create so
     there is exactly one place that builds the JWT and performs the webhook
-    call.  Never raises: a failure here must not fail the caller's primary
+    call. Never raises: a failure here must not fail the caller's primary
     operation (order creation / status update), it is only logged.
-
-    Errors are logged with increasing specificity so the cause is traceable
-    in production logs without adding noise to the successful path.
     """
     edge_chat_url = getattr(settings, 'EDGE_CHAT_URL', 'http://localhost:8787')
     jwt_secret = getattr(settings, 'EDGE_CHAT_JWT_SECRET', '')
-    app_id = getattr(settings, 'EDGE_CHAT_APP_ID', 'cycleuni')
-
-    if not edge_chat_url:
-        logger.warning("[%s] Skipped: EDGE_CHAT_URL not configured", log_prefix)
-        return
-    if not jwt_secret:
-        logger.warning("[%s] Skipped: EDGE_CHAT_JWT_SECRET not configured", log_prefix)
+    if not (edge_chat_url and jwt_secret):
         return
 
-    # ---- Step 1: build and sign the JWT ----
     try:
         import urllib.request
-        import urllib.error
         import json
         from rest_framework_simplejwt.backends import TokenBackend
-        token = TokenBackend(algorithm="HS256", signing_key=jwt_secret).encode({
+        app_id = getattr(settings, 'EDGE_CHAT_APP_ID', 'cycleuni')
+        token_backend = TokenBackend(algorithm="HS256", signing_key=jwt_secret)
+        token = token_backend.encode({
             "user_id": str(sender.id),
             "room_id": str(conv.id),
+            # CFEdgeChat now rejects room-scoped requests unless the
+            # token's app_id claim matches the `appId` URL segment
+            # below exactly (its ChatRoom DO is keyed by
+            # `${appId}:${roomId}`). See settings.EDGE_CHAT_APP_ID.
             "app_id": app_id,
             "participant_ids": [str(conv.buyer_id), str(conv.listing.seller_id)],
             "role": "system",
         })
-    except Exception:
-        logger.exception("[%s] While building JWT", log_prefix)
-        return
-
-    # ---- Step 2: POST to CFEdgeChat ----
-    url = f"{edge_chat_url}/api/{app_id}/{conv.id}/messages"
-    try:
         req = urllib.request.Request(
-            url,
+            f"{edge_chat_url}/api/{app_id}/{conv.id}/messages",
             data=json.dumps({"content": msg_body}).encode('utf-8'),
             headers={
                 "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
+                "Content-Type": "application/json"
             },
-            method="POST",
+            method="POST"
         )
-        resp = urllib.request.urlopen(req, timeout=5)
-        if resp.status >= 400:
-            body = resp.read().decode('utf-8', errors='replace')[:500]
-            logger.error("[%s] POST %s -> HTTP %s body=%s", log_prefix, url, resp.status, body)
-        else:
-            logger.info("[%s] POST %s -> HTTP %s OK", log_prefix, url, resp.status)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode('utf-8', errors='replace')[:500] if e.fp else ''
-        logger.error("[%s] POST %s -> HTTP %s body: %s", log_prefix, url, e.code, body)
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
-        logger.error("[%s] POST %s -> network error: %s", log_prefix, url, e)
+        urllib.request.urlopen(req, timeout=3)
     except Exception:
-        logger.exception("[%s] POST %s -> unexpected error", log_prefix, url)
+        logger.exception("[%s] Edge chat sync skipped or error", log_prefix)
 
 
 def send_order_notification(order, message_key, sender=None, recipient=None):
