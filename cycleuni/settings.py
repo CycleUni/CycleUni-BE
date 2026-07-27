@@ -232,14 +232,17 @@ WSGI_APPLICATION = "cycleuni.wsgi.application"
 # For standard Vercel Pro, keep 0.
 CONN_MAX_AGE = 0
 
-# Add Postgres-specific options only when using the PostgreSQL backend.
-# SQLite (local dev fallback) doesn't support 'options' or 'server_side_binding'.
+# Neon pooler rejects statement_timeout as a startup parameter and requires
+# SSL. Set sslmode=require explicitly and drop server_side_binding (also
+# unsupported by Neon pooler). For query-timeout protection, set a short
+# connect_timeout — the frontend RetryInterceptor will handle the rest.
 if DATABASES["default"]["ENGINE"] == "django.db.backends.postgresql":
     current_options = DATABASES["default"].get("OPTIONS", {})
+    # Only merge options that we know aren't already set by the user
     DATABASES["default"]["OPTIONS"] = {
+        "sslmode": "require",
+        "connect_timeout": 8,
         **current_options,
-        "options": "-c statement_timeout=8000",  # 8s per query — faster fail
-        "server_side_binding": True,
     }
 
 # Password validation
