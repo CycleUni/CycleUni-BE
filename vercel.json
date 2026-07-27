@@ -1,17 +1,13 @@
 {
     "version": 2,
-    "functions": {
-        "cycleuni/wsgi.py": {
-            "maxDuration": 10
-        }
-    },
     "builds": [
         {
             "src": "cycleuni/wsgi.py",
             "use": "@vercel/python",
             "config": {
                 "maxLambdaSize": "15mb",
-                "runtime": "python3.14"
+                "runtime": "python3.14",
+                "maxDuration": 10
             }
         },
         {
