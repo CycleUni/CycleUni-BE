@@ -232,14 +232,15 @@ WSGI_APPLICATION = "cycleuni.wsgi.application"
 # For standard Vercel Pro, keep 0.
 CONN_MAX_AGE = 0
 
-# Neon requires SSL — but in a serverless context the connection is always
-# over TLS and the `sslmode` parameter is handled at the libpq level.
-# Explicitly setting it here prevents a startup-time log warning.
-DATABASES["default"]["OPTIONS"] = {
-    **(DATABASES["default"].get("OPTIONS", {})),
-    "options": "-c statement_timeout=8000",  # 8s per query — faster fail
-    "server_side_binding": True,
-}
+# Add Postgres-specific options only when using the PostgreSQL backend.
+# SQLite (local dev fallback) doesn't support 'options' or 'server_side_binding'.
+if DATABASES["default"]["ENGINE"] == "django.db.backends.postgresql":
+    current_options = DATABASES["default"].get("OPTIONS", {})
+    DATABASES["default"]["OPTIONS"] = {
+        **current_options,
+        "options": "-c statement_timeout=8000",  # 8s per query — faster fail
+        "server_side_binding": True,
+    }
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
