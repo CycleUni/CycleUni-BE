@@ -541,6 +541,8 @@ class MyProfileView(views.APIView):
         first_name = request.data.get('first_name')
         last_name = request.data.get('last_name')
         email = request.data.get('email')
+        last_seen_bought_orders_at = request.data.get('last_seen_bought_orders_at')
+        last_seen_sold_orders_at = request.data.get('last_seen_sold_orders_at')
         
         if first_name is not None and not isinstance(first_name, str):
             return Response({"first_name": [_("Invalid value.")]}, status=status.HTTP_400_BAD_REQUEST)
@@ -573,6 +575,17 @@ class MyProfileView(views.APIView):
                     return Response({"error": {"code": "acct.errEduEmailChangeNotAllowed"}}, status=status.HTTP_400_BAD_REQUEST)
                 user.email = email
                 updated_fields.append('email')
+
+        from django.utils.dateparse import parse_datetime
+        if last_seen_bought_orders_at is not None:
+            parsed = parse_datetime(last_seen_bought_orders_at) if last_seen_bought_orders_at else None
+            user.last_seen_bought_orders_at = parsed
+            updated_fields.append('last_seen_bought_orders_at')
+        
+        if last_seen_sold_orders_at is not None:
+            parsed = parse_datetime(last_seen_sold_orders_at) if last_seen_sold_orders_at else None
+            user.last_seen_sold_orders_at = parsed
+            updated_fields.append('last_seen_sold_orders_at')
             
         if updated_fields:
             user.save(update_fields=updated_fields)

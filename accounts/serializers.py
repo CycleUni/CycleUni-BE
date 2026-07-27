@@ -28,8 +28,8 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ('id', 'email', 'edu_email', 'first_name', 'last_name', 'display_name', 'school', 'school_name', 'is_active', 'verified_at', 'average_rating', 'review_count', 'no_show_count', 'has_password', 'is_google_linked', 'avatar_url', 'is_staff', 'is_superuser')
-        read_only_fields = ('id', 'edu_email', 'display_name', 'school', 'school_name', 'is_active', 'verified_at', 'average_rating', 'review_count', 'no_show_count', 'has_password', 'is_google_linked', 'avatar_url', 'is_staff', 'is_superuser')
+        fields = ('id', 'email', 'edu_email', 'first_name', 'last_name', 'display_name', 'school', 'school_name', 'is_active', 'verified_at', 'average_rating', 'review_count', 'no_show_count', 'has_password', 'is_google_linked', 'avatar_url', 'last_seen_bought_orders_at', 'last_seen_sold_orders_at', 'is_staff', 'is_superuser')
+        read_only_fields = ('id', 'edu_email', 'display_name', 'school', 'school_name', 'is_active', 'verified_at', 'average_rating', 'review_count', 'no_show_count', 'has_password', 'is_google_linked', 'avatar_url', 'last_seen_bought_orders_at', 'last_seen_sold_orders_at', 'is_staff', 'is_superuser')
 
 
 class PublicUserProfileSerializer(serializers.ModelSerializer):

@@ -65,6 +65,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     verified_at = models.DateTimeField(null=True, blank=True, help_text="首次通過 .edu.tw 驗證時間")
     last_reverified_at = models.DateTimeField(null=True, blank=True, help_text="上一次重新驗證在校生身分的時間")
     
+    last_seen_bought_orders_at = models.DateTimeField(null=True, blank=True, help_text="Timestamp of the most recent bought order seen by the user")
+    last_seen_sold_orders_at = models.DateTimeField(null=True, blank=True, help_text="Timestamp of the most recent sold order seen by the user")
+    
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
