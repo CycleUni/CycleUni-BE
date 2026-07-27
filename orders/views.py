@@ -29,33 +29,41 @@ def _post_edge_chat_message(conv, sender, msg_body, log_prefix):
 
     try:
         import urllib.request
+        import urllib.error
         import json
         from rest_framework_simplejwt.backends import TokenBackend
         app_id = getattr(settings, 'EDGE_CHAT_APP_ID', 'cycleuni')
-        token_backend = TokenBackend(algorithm="HS256", signing_key=jwt_secret)
-        token = token_backend.encode({
+        token = TokenBackend(algorithm="HS256", signing_key=jwt_secret).encode({
             "user_id": str(sender.id),
             "room_id": str(conv.id),
-            # CFEdgeChat now rejects room-scoped requests unless the
-            # token's app_id claim matches the `appId` URL segment
-            # below exactly (its ChatRoom DO is keyed by
-            # `${appId}:${roomId}`). See settings.EDGE_CHAT_APP_ID.
             "app_id": app_id,
             "participant_ids": [str(conv.buyer_id), str(conv.listing.seller_id)],
             "role": "system",
         })
+        url = f"{edge_chat_url}/api/{app_id}/{conv.id}/messages"
         req = urllib.request.Request(
-            f"{edge_chat_url}/api/{app_id}/{conv.id}/messages",
+            url,
             data=json.dumps({"content": msg_body}).encode('utf-8'),
             headers={
                 "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                # cfedgechaft.workers.dev blocks bot-like requests
+                # (Cloudflare error 1010). A proper User-Agent avoids that.
+                "User-Agent": "CycleUni-BE/1.0",
             },
-            method="POST"
+            method="POST",
         )
-        urllib.request.urlopen(req, timeout=3)
+        resp = urllib.request.urlopen(req, timeout=5)
+        if resp.status >= 400:
+            body = resp.read().decode('utf-8', errors='replace')[:500]
+            logger.error("[%s] POST %s -> HTTP %s body: %s", log_prefix, url, resp.status, body)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode('utf-8', errors='replace')[:500] if e.fp else ''
+        logger.error("[%s] POST %s -> HTTP %s body: %s", log_prefix, url, e.code, body)
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        logger.error("[%s] POST %s -> network error: %s", log_prefix, url, e)
     except Exception:
-        logger.exception("[%s] Edge chat sync skipped or error", log_prefix)
+        logger.exception("[%s] POST %s -> unexpected error", log_prefix, url)
 
 
 def send_order_notification(order, message_key, sender=None, recipient=None):
