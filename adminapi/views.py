@@ -3,6 +3,15 @@ orders). Every view here requires IsAdminUser (request.user.is_staff) — no
 exceptions. Granting admin rights (is_staff/is_superuser) stays Django-admin
 only, by design; this API can never set those fields (see AdminUserDetailView).
 """
+import logging
+import os
+import time
+import datetime as dt
+import requests
+
+import jwt
+
+from django.conf import settings
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -15,13 +24,16 @@ from accounts.models import School, User
 from accounts.views import invalidate_home_static_cache
 from core.models import AuditEvent, Category
 from listings.models import Listing
+from moderation.models import ChatReport
 from orders.models import Order
 from orders.views import send_order_notification
 
 from .serializers import (
-    AdminListingSerializer, AdminOrderSerializer, AdminUserSerializer,
-    AdminSchoolSerializer, AdminCategorySerializer
+    AdminChatReportSerializer, AdminListingSerializer, AdminOrderSerializer,
+    AdminUserSerializer, AdminSchoolSerializer, AdminCategorySerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 # is_staff/is_superuser/password/groups/user_permissions must never be settable
 # through this API — granting admin rights stays Django-admin-only (security
@@ -74,11 +86,24 @@ class AdminUserDetailView(generics.RetrieveUpdateAPIView):
         instance = self.get_object()
         changes = {}
 
+        # Prevent admin from disabling their own account
+        if request.data.get('is_active') is False and instance.id == request.user.id:
+            return Response(
+                {"error": {"code": "admin.errSelfDisable"}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         if 'is_active' in request.data:
             value = request.data['is_active']
             if not isinstance(value, bool):
                 return Response(
                     {"error": {"code": "admin.errInvalidField"}},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # Prevent disabling superuser or staff accounts
+            if not value and (instance.is_superuser or instance.is_staff):
+                return Response(
+                    {"error": {"code": "admin.errForbiddenField"}},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             if instance.is_active != value:
@@ -487,4 +512,105 @@ class AdminCategoryBulkImportView(views.APIView):
             "new": new_items,
             "modified": modified_items,
             "unchanged": unchanged_items
+        })
+
+
+# ── ChatReport admin views ─────────────────────────────────────────────
+
+class AdminChatReportListView(generics.ListAPIView):
+    """GET /api/v1/admin/chat-reports/ (read-only list)"""
+    permission_classes = [IsAdminUser]
+    serializer_class = AdminChatReportSerializer
+    pagination_class = PageNumberPagination
+
+    def get_queryset(self):
+        qs = ChatReport.objects.select_related(
+            'conversation', 'conversation__listing', 'conversation__listing__book',
+            'reporter', 'reported_party'
+        ).order_by('-created_at')
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param)
+        return qs
+
+
+class AdminChatReportDetailView(generics.RetrieveUpdateAPIView):
+    """GET / PATCH /api/v1/admin/chat-reports/<id>/"""
+    permission_classes = [IsAdminUser]
+    serializer_class = AdminChatReportSerializer
+    queryset = ChatReport.objects.select_related(
+        'conversation', 'conversation__listing', 'conversation__listing__book',
+        'reporter', 'reported_party'
+    ).all()
+    lookup_field = 'pk'
+    http_method_names = ['get', 'patch']
+
+    def patch(self, request, *args, **kwargs):
+        allowed_fields = {'status'}
+        extra = set(request.data.keys()) - allowed_fields
+        if extra:
+            return Response(
+                {"error": {"code": "admin.errForbiddenField"}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if 'status' not in request.data:
+            return Response(
+                {"error": {"code": "admin.errInvalidField"}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        new_status = request.data['status']
+        if new_status not in ('open', 'actioned', 'dismissed'):
+            return Response(
+                {"error": {"code": "admin.errInvalidStatus"}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        instance = self.get_object()
+        old_status = instance.status
+        instance.status = new_status
+        instance.save(update_fields=['status'])
+
+        AuditEvent.objects.create(
+            user=request.user,
+            kind='admin.chat_report_updated',
+            meta={
+                'chat_report_id': str(instance.id),
+                'old_status': old_status,
+                'new_status': new_status,
+            },
+        )
+
+        return Response(AdminChatReportSerializer(instance).data)
+
+
+class AdminChatReportTokenView(views.APIView):
+    """GET /api/v1/admin/chat-reports/<id>/chat-token/ — issue room-scoped JWT for admin message viewing."""
+    permission_classes = [IsAdminUser]
+
+    def get(self, request, pk):
+        chat_report = get_object_or_404(ChatReport.objects.select_related('conversation'), pk=pk)
+        conv = chat_report.conversation
+
+        edge_jwt_secret = os.getenv('EDGE_CHAT_JWT_SECRET', '')
+        if not edge_jwt_secret:
+            return Response(
+                {"error": {"code": "admin.chatNotConfigured"}},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        app_id = getattr(settings, 'EDGE_CHAT_APP_ID', 'cycleuni')
+        payload = {
+            'user_id': str(request.user.id),
+            'room_id': str(conv.id),
+            'app_id': app_id,
+            'exp': int(time.time()) + 300,
+        }
+        token = jwt.encode(payload, edge_jwt_secret, algorithm='HS256')
+
+        edge_chat_url = os.getenv('EDGE_CHAT_URL', '').strip('/')
+        return Response({
+            'token': token,
+            'edge_chat_url': edge_chat_url,
+            'room_id': str(conv.id),
         })

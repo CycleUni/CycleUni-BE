@@ -60,6 +60,15 @@ class UserAdmin(BaseUserAdmin):
         }),
     )
 
+    def get_readonly_fields(self, request, obj=None):
+        # Prevent non-superusers from disabling superuser/staff accounts
+        if not request.user.is_superuser:
+            if obj and obj.is_superuser:
+                return ['is_active', 'is_staff', 'is_superuser']
+            if obj and obj.is_staff and request.user != obj:
+                return ['is_active']
+        return super().get_readonly_fields(request, obj)
+
     @admin.display(boolean=True, description='Verified')
     def is_verified_status(self, obj):
         return obj.is_verified()

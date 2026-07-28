@@ -11,10 +11,10 @@ class Conversation(models.Model):
     latest_message_body = models.TextField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    # Per-participant read pointers. A conversation is unread for a given
-    # participant when `updated_at` is newer than their own column here —
-    # two columns (not a generic read-state table) because a conversation
-    # only ever has exactly these two participants (buyer, listing.seller).
+    # --- Read-state (DEPRECATED — now owned by CFEdgeChat UserHub) ---
+    # DEPRECATED: Read-state is now managed by CFEdgeChat's UserHub
+    # (POST /api/<app>/<room>/read). These fields are no longer updated
+    # by the webhook — kept only to avoid a new migration.
     buyer_last_read_at = models.DateTimeField(null=True, blank=True)
     seller_last_read_at = models.DateTimeField(null=True, blank=True)
 

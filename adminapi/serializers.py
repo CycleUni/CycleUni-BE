@@ -10,6 +10,7 @@ from rest_framework import serializers
 from accounts.models import User, School
 from core.models import Category
 from listings.models import Listing
+from moderation.models import ChatReport
 from orders.models import Order
 
 
@@ -85,3 +86,31 @@ class AdminOrderSerializer(serializers.ModelSerializer):
         model = Order
         fields = ('id', 'buyer', 'seller', 'listing', 'status', 'total_amount', 'created_at', 'updated_at')
         read_only_fields = fields
+
+
+class AdminChatReportSerializer(serializers.ModelSerializer):
+    conversation_id = serializers.SerializerMethodField()
+    listing_title = serializers.SerializerMethodField()
+    reporter_email = serializers.SerializerMethodField()
+    reported_party_email = serializers.SerializerMethodField()
+
+    def get_conversation_id(self, obj):
+        return str(obj.conversation_id)
+
+    def get_listing_title(self, obj):
+        return obj.conversation.listing.book.title
+
+    def get_reporter_email(self, obj):
+        return obj.reporter.email
+
+    def get_reported_party_email(self, obj):
+        return obj.reported_party.email
+
+    class Meta:
+        model = ChatReport
+        fields = ('id', 'conversation_id', 'listing_title', 'reporter_email',
+                  'reported_party_email', 'reason', 'detail', 'status', 'created_at')
+        read_only_fields = fields
+
+
+

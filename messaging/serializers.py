@@ -11,14 +11,15 @@ class ConversationSerializer(serializers.ModelSerializer):
     listing_course = serializers.CharField(source='listing.course_name', read_only=True, default='')
     other_party = serializers.SerializerMethodField()
     other_party_role = serializers.SerializerMethodField()
+    buyer_id = serializers.IntegerField(source='buyer.id', read_only=True)
+    seller_id = serializers.IntegerField(source='listing.seller.id', read_only=True)
     latest_message = serializers.SerializerMethodField()
-    unread = serializers.SerializerMethodField()
     order_id = serializers.SerializerMethodField()
     order_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Conversation
-        fields = ['id', 'listing_id', 'listing_title', 'listing_photo', 'listing_price', 'listing_condition', 'listing_course', 'other_party', 'other_party_role', 'latest_message', 'updated_at', 'unread', 'order_id', 'order_status']
+        fields = ['id', 'listing_id', 'listing_title', 'listing_photo', 'listing_price', 'listing_condition', 'listing_course', 'other_party', 'other_party_role', 'buyer_id', 'seller_id', 'latest_message', 'updated_at', 'order_id', 'order_status']
 
     # A conversation can accumulate more than one Order over time (declined,
     # then the buyer requests again) — always resolve to the most recently
@@ -58,13 +59,6 @@ class ConversationSerializer(serializers.ModelSerializer):
 
     def get_latest_message(self, obj):
         return obj.latest_message_body if obj.latest_message_body else ""
-
-    def get_unread(self, obj):
-        request = self.context.get('request')
-        if not request or not obj.latest_message_body:
-            return False
-        last_read_at = obj.buyer_last_read_at if obj.buyer_id == request.user.id else obj.seller_last_read_at
-        return last_read_at is None or obj.updated_at > last_read_at
 
     def get_listing_photo(self, obj):
         if obj.listing.photos and len(obj.listing.photos) > 0:

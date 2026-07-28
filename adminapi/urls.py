@@ -15,6 +15,9 @@ from .views import (
     AdminCategoryDetailView,
     AdminSchoolBulkImportView,
     AdminCategoryBulkImportView,
+    AdminChatReportListView,
+    AdminChatReportDetailView,
+    AdminChatReportTokenView,
 )
 
 urlpatterns = [
@@ -32,4 +35,7 @@ urlpatterns = [
     path('categories/', AdminCategoryListView.as_view(), name='admin-categories-list'),
     path('categories/bulk/', AdminCategoryBulkImportView.as_view(), name='admin-categories-bulk'),
     path('categories/<int:pk>/', AdminCategoryDetailView.as_view(), name='admin-categories-detail'),
+    path('chat-reports/', AdminChatReportListView.as_view(), name='admin-chat-report-list'),
+    path('chat-reports/<uuid:pk>/', AdminChatReportDetailView.as_view(), name='admin-chat-report-detail'),
+    path('chat-reports/<uuid:pk>/chat-token/', AdminChatReportTokenView.as_view(), name='admin-chat-report-token'),
 ]

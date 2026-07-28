@@ -287,7 +287,7 @@ class LoginView(views.APIView):
 
         if not user.check_password(password):
             return invalid_credentials
-        if not user.is_active:
+        if not user.is_active and not user.is_superuser:
             return Response({"error": {"code": "auth.errAccountDisabled"}}, status=status.HTTP_403_FORBIDDEN)
 
         tokens = issue_tokens(user)
@@ -325,7 +325,7 @@ class RefreshTokenView(views.APIView):
                 return Response({"error": {"code": "auth.errTokenRevoked"}}, status=status.HTTP_401_UNAUTHORIZED)
 
             user = User.objects.get(id=user_id)
-            if not user.is_active:
+            if not user.is_active and not user.is_superuser:
                 return Response({"error": {"code": "auth.errAccountDisabled"}}, status=status.HTTP_403_FORBIDDEN)
 
             tokens = issue_tokens(user)
@@ -398,11 +398,14 @@ class GoogleLoginView(views.APIView):
                 user.set_unusable_password()
                 user.save()
             
-            # If the user registered normally but hasn't activated their account (is_active=False),
-            # Google login proves email ownership, so we activate them automatically.
-            if not user.is_active:
-                user.is_active = True
-                user.save(update_fields=['is_active'])
+            # Block login for disabled accounts (except superusers).
+            # No auto-reactivation: once an admin disables an account,
+            # Google login alone does not bypass the block.
+            if not user.is_active and not user.is_superuser:
+                return Response(
+                    {"error": {"code": "auth.errAccountDisabled"}},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
 
             # Automatically bind and verify edu email if the Google email is a supported .edu.tw address
             if email.endswith('.edu.tw') and (not user.verified_at or user.edu_email != email):
@@ -668,6 +671,12 @@ class RequestPasswordResetView(views.APIView):
         if user.socialaccount_set.filter(provider='google').exists():
             return Response({"code": "acct.passwordResetSent"})
 
+        # Disabled users (is_active=False) should not be able to reset
+        # their password, except superusers. Generic response to avoid
+        # leaking account status.
+        if not user.is_active and not user.is_superuser:
+            return Response({"code": "acct.passwordResetSent"})
+
         reset_token = str(uuid.uuid4())
         cache.set(f"password-reset:{reset_token}", {"user_id": user.id}, timeout=3600)
         reset_link = f"{settings.FRONTEND_URL}/reset-password?token={reset_token}"
@@ -704,6 +713,13 @@ class ConfirmPasswordResetView(views.APIView):
             user = User.objects.get(id=token_data.get('user_id'))
         except User.DoesNotExist:
             return Response({"error": {"code": "auth.errUserNotFound"}}, status=status.HTTP_404_NOT_FOUND)
+
+        # Guard against disabled accounts that may still hold a valid token
+        # (e.g., issued before the account was disabled).
+        # Superusers always retain the ability to reset.
+        if not user.is_active and not user.is_superuser:
+            cache.delete(f"password-reset:{token}")
+            return Response({"error": {"code": "auth.errAccountDisabled"}}, status=status.HTTP_403_FORBIDDEN)
 
         try:
             validate_password(new_password, user=user)
