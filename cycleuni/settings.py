@@ -238,14 +238,15 @@ WSGI_APPLICATION = "cycleuni.wsgi.application"
 CONN_MAX_AGE = 0
 
 # Neon pooler rejects statement_timeout as a startup parameter and requires
-# SSL. Set sslmode=require explicitly and drop server_side_binding (also
-# unsupported by Neon pooler). For query-timeout protection, set a short
-# connect_timeout — the frontend RetryInterceptor will handle the rest.
+# SSL. Set sslmode=require by default (overridable via POSTGRES_SSLMODE for
+# local/dev databases like postgres:16-alpine that don't have SSL configured).
+# For query-timeout protection, set a short connect_timeout — the frontend
+# RetryInterceptor will handle the rest.
 if DATABASES["default"]["ENGINE"] == "django.db.backends.postgresql":
     current_options = DATABASES["default"].get("OPTIONS", {})
     # Only merge options that we know aren't already set by the user
     DATABASES["default"]["OPTIONS"] = {
-        "sslmode": "require",
+        "sslmode": env.str("POSTGRES_SSLMODE", default="require"),
         "connect_timeout": 8,
         **current_options,
     }
