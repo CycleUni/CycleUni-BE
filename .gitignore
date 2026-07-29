@@ -31,3 +31,6 @@ coverage.xml
 .idea/
 .vscode/
 /media
+
+# --- collectstatic 產物（容器 / CI 重新產生）---
+staticfiles_build/
