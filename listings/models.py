@@ -1,7 +1,14 @@
+import logging
 import uuid
+from urllib.parse import urlparse
+
 from django.db import models
 from django.conf import settings
+from django.core.files.storage import default_storage
+
 from catalog.models import Book
+
+logger = logging.getLogger(__name__)
 
 # NOTE: these two callables are no longer used by the current Listing model
 # (the delivery_methods/payment_methods fields they defaulted were removed in
@@ -50,3 +57,32 @@ class Listing(models.Model):
 
     def __str__(self):
         return f"Listing {self.id} for {self.book.title} by {self.seller.email}"
+
+    def delete(self, *args, **kwargs):
+        """Delete the listing record and its associated R2 photos.
+
+        When a listing is deleted, its uploaded photos should be removed from
+        object storage (R2 or local FileSystemStorage) so orphaned files don't
+        accumulate. Photo deletion failures are logged but do not prevent the
+        database record from being removed — a stale object in the bucket is
+        less harmful than an undeletable listing row.
+        """
+        if self.photos:
+            for photo_url in self.photos:
+                try:
+                    # Extract the R2 key (path portion) from the full URL.
+                    # Photo URLs have the form:
+                    #   https://<custom_domain>/listings/<uuid>.<ext>
+                    # The R2 key is: listings/<uuid>.<ext>
+                    parsed = urlparse(photo_url)
+                    key = parsed.path.lstrip('/')
+                    default_storage.delete(key)
+                    logger.info("Deleted photo %s for listing %s", key, self.id)
+                except Exception:
+                    logger.warning(
+                        "Failed to delete photo %s for listing %s (listing will be deleted anyway)",
+                        photo_url, self.id,
+                        exc_info=True,
+                    )
+
+        return super().delete(*args, **kwargs)

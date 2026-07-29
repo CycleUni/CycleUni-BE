@@ -146,3 +146,133 @@ def test_ignores_listings_created_before_subscription(api, waitlister, seller, b
     resp = api.get("/api/cron/waitlist-notify/", **cron_auth())
     assert resp.json() == {"notified_users": 0, "notified_subscriptions": 0}
     assert len(mailoutbox) == 0
+
+
+# ── CleanupView tests ────────────────────────────────────────────────────────
+
+
+def test_cleanup_rejects_missing_auth_header(api, db):
+    resp = api.get("/api/cron/cleanup/")
+    assert resp.status_code == 403
+
+
+def test_cleanup_rejects_wrong_token(api, db):
+    resp = api.get("/api/cron/cleanup/", **cron_auth("wrong-token"))
+    assert resp.status_code == 403
+
+
+def test_cleanup_rejects_when_cron_secret_unset(api, db, settings):
+    settings.CRON_SECRET = ""
+    resp = api.get("/api/cron/cleanup/", **cron_auth())
+    assert resp.status_code == 403
+
+
+def test_cleanup_noop_when_no_orphan_books(api, db):
+    resp = api.get("/api/cron/cleanup/", **cron_auth())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["orphan_books_deleted"] == 0
+    assert data["scanned_books"] == 0
+
+
+def test_cleanup_deletes_orphan_books(api, db, seller):
+    b1 = Book.objects.create(isbn13="9780000000001", title="Orphan 1", source="manual")
+    b2 = Book.objects.create(isbn13="9780000000002", title="Orphan 2", source="manual")
+    assert Book.objects.count() == 2
+
+    resp = api.get("/api/cron/cleanup/", **cron_auth())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["orphan_books_deleted"] == 2
+    assert data["scanned_books"] == 2
+    assert Book.objects.count() == 0
+
+
+def test_cleanup_keeps_books_with_listing(api, db, seller, book):
+    Listing.objects.create(book=book, seller=seller, price=100, condition="new", status="active")
+
+    resp = api.get("/api/cron/cleanup/", **cron_auth())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["orphan_books_deleted"] == 0
+    assert data["scanned_books"] == 1
+    assert Book.objects.filter(id=book.id).exists()
+
+
+def test_cleanup_keeps_books_with_subscription(api, db, waitlister, book):
+    Subscription.objects.create(user=waitlister, book=book)
+
+    resp = api.get("/api/cron/cleanup/", **cron_auth())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["orphan_books_deleted"] == 0
+    assert data["scanned_books"] == 1
+    assert Book.objects.filter(id=book.id).exists()
+
+
+def test_cleanup_keeps_books_with_both_listing_and_subscription(api, db, seller, waitlister, book):
+    Listing.objects.create(book=book, seller=seller, price=10, condition="new", status="active")
+    Subscription.objects.create(user=waitlister, book=book)
+
+    resp = api.get("/api/cron/cleanup/", **cron_auth())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["orphan_books_deleted"] == 0
+    assert data["scanned_books"] == 1
+    assert Book.objects.filter(id=book.id).exists()
+
+
+def test_cleanup_mixed_scenario(api, db, seller, waitlister):
+    orphan = Book.objects.create(isbn13="9780000000003", title="Orphan", source="manual")
+    orphan2 = Book.objects.create(isbn13="9780000000004", title="Orphan 2", source="manual")
+    kept_with_listing = Book.objects.create(isbn13="9780000000005", title="Has Listing",
+                                           source="manual")
+    kept_with_sub = Book.objects.create(isbn13="9780000000006", title="Has Sub",
+                                        source="manual")
+
+    Listing.objects.create(book=kept_with_listing, seller=seller, price=10,
+                          condition="new", status="active")
+    Subscription.objects.create(user=waitlister, book=kept_with_sub)
+
+    assert Book.objects.count() == 4
+
+    resp = api.get("/api/cron/cleanup/", **cron_auth())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["orphan_books_deleted"] == 2
+    assert data["scanned_books"] == 4
+    assert not Book.objects.filter(id=orphan.id).exists()
+    assert not Book.objects.filter(id=orphan2.id).exists()
+    assert Book.objects.filter(id=kept_with_listing.id).exists()
+    assert Book.objects.filter(id=kept_with_sub.id).exists()
+
+
+def test_cleanup_via_post(api, db):
+    orphan = Book.objects.create(isbn13="9780000000006", title="POST Orphan", source="manual")
+    resp = api.post("/api/cron/cleanup/", **cron_auth())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["orphan_books_deleted"] == 1
+    assert data["scanned_books"] == 1
+    assert not Book.objects.filter(id=orphan.id).exists()
+
+
+def test_cleanup_keeps_books_with_sold_or_removed_listings(api, db, seller, book):
+    # Sold listing: book should still be kept (it's NOT orphan)
+    Listing.objects.create(book=book, seller=seller, price=10, condition="new", status="sold")
+
+    resp = api.get("/api/cron/cleanup/", **cron_auth())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["orphan_books_deleted"] == 0
+    assert data["scanned_books"] == 1
+    assert Book.objects.filter(id=book.id).exists()
+
+
+def test_cleanup_deletes_preseed_book_when_orphan(api, db):
+    book = Book.objects.create(isbn13="9780000000007", title="Preseed Orphan",
+                               source="preseed")
+    resp = api.get("/api/cron/cleanup/", **cron_auth())
+    assert resp.status_code == 200
+    assert resp.json()["orphan_books_deleted"] == 1
+    assert not Book.objects.filter(id=book.id).exists()

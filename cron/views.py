@@ -4,7 +4,7 @@ from collections import defaultdict
 
 from django.conf import settings
 from django.core.mail import send_mail
-from django.db.models import F, Max, Q
+from django.db.models import Count, F, Max, Q
 from django.utils import timezone
 from rest_framework import views, status
 from rest_framework.permissions import BasePermission
@@ -117,4 +117,46 @@ class WaitlistNotifyView(views.APIView):
         return Response({
             "notified_users": notified_users,
             "notified_subscriptions": notified_subscriptions,
+        }, status=status.HTTP_200_OK)
+
+
+class CleanupView(views.APIView):
+    """Deletes books that have no listings and no subscriptions.
+
+    Called periodically by an external scheduler (Vercel Cron via GET).
+    Uses the same HasCronSecret authentication as WaitlistNotifyView.
+    """
+    authentication_classes = []
+    permission_classes = [HasCronSecret]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'cron'
+
+    def get(self, request):
+        return self._run()
+
+    def post(self, request):
+        return self._run()
+
+    def _run(self):
+        from catalog.models import Book
+
+        # Books with zero listings (any status) AND zero subscriptions
+        orphans = (
+            Book.objects
+            .annotate(
+                listing_count=Count('listings'),
+                subscription_count=Count('subscriptions'),
+            )
+            .filter(listing_count=0, subscription_count=0)
+        )
+
+        total_scanned = Book.objects.count()
+        to_delete = orphans.count()
+        orphans.delete()
+
+        logger.info("Cleanup: deleted %d orphan books out of %d total", to_delete, total_scanned)
+
+        return Response({
+            "orphan_books_deleted": to_delete,
+            "scanned_books": total_scanned,
         }, status=status.HTTP_200_OK)

@@ -345,8 +345,29 @@ class ListingDetailView(views.APIView):
     def delete(self, request, pk):
         listing = self.get_object(request, pk, require_seller=True)
         if not listing:
-             return Response(status=status.HTTP_404_NOT_FOUND)
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        book = listing.book
         listing.delete()
         for l in ['zh-TW', 'en']:
-             cache.delete(f"listing_detail_{l}_{pk}")
+            cache.delete(f"listing_detail_{l}_{pk}")
+
+        # If the book now has zero listings and zero subscriptions,
+        # it’s an orphan — delete it immediately so the catalog
+        # doesn’t accumulate dead entries.
+        from django.db.models import Count
+        from catalog.models import Book
+        orphan = (
+            Book.objects
+            .filter(id=book.id)
+            .annotate(
+                listing_count=Count('listings'),
+                subscription_count=Count('subscriptions'),
+            )
+            .filter(
+                listing_count=0,
+                subscription_count=0,
+            )
+        )
+        orphan.delete()
+
         return Response(status=status.HTTP_204_NO_CONTENT)

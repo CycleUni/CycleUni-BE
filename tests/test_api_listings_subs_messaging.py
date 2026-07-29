@@ -173,6 +173,34 @@ def test_listing_patch_and_delete_own_only(api, listing, seller, buyer):
     assert not Listing.objects.filter(id=listing.id).exists()
 
 
+def test_listing_delete_cleans_up_r2_photos(api, seller, book):
+    """When a listing with photo URLs is deleted, the Listing.delete()
+    override attempts to remove each photo from object storage via
+    default_storage.delete() — failures are swallowed so the DB row
+    is always removed."""
+    listing = Listing.objects.create(
+        book=book, seller=seller, price=200, condition="new", status="active",
+        photos=[
+            "https://media.example.invalid/listings/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.png",
+            "https://media.example.invalid/listings/11111111-2222-3333-4444-555555555555.jpg",
+        ],
+    )
+    listing_id = listing.id
+
+    # Delete through the override
+    listing.delete()
+    assert not Listing.objects.filter(id=listing_id).exists()
+
+    # Repeat with empty photos — should also succeed
+    listing2 = Listing.objects.create(
+        book=book, seller=seller, price=20, condition="new", status="active",
+        photos=[],
+    )
+    listing2_id = listing2.id
+    listing2.delete()
+    assert not Listing.objects.filter(id=listing2_id).exists()
+
+
 def _real_png_bytes():
     """A genuine 1x1 PNG — ListingUploadDirectView decodes uploads with
     Pillow to confirm they're real images, so arbitrary bytes don't pass."""
