@@ -7,4 +7,5 @@ urlpatterns = [
     path('<uuid:pk>/', views.ListingDetailView.as_view(), name='listing_detail'),
     path('uploads/', views.ListingUploadURLView.as_view(), name='listing-uploads'),
     path('uploads/direct/', views.ListingUploadDirectView.as_view(), name='listing-uploads-direct'),
+    path('uploads/delete/', views.ListingUploadDeleteView.as_view(), name='listing-uploads-delete'),
 ]

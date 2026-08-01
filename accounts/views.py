@@ -27,6 +27,7 @@ from accounts.services import (
     email_already_used,
 )
 from accounts.models import School
+from core.cache import HOME_STATIC_TTL, HOME_WAITLIST_TTL
 from core.i18n import resolve_language
 from core.models import Category
 from listings.serializers import ListingSerializer
@@ -804,16 +805,21 @@ class HomeMetadataView(views.APIView):
                 "schools": schools,
                 "categories": categories,
             }
-            cache.set(static_cache_key, static_data, timeout=86400)  # 24 hours
+            # Long TTL is safe here only because admin edits invalidate this
+            # immediately (invalidate_home_static_cache); it's a backstop, not
+            # the staleness window.
+            cache.set(static_cache_key, static_data, timeout=HOME_STATIC_TTL)
 
-        # 2. Dynamic data (Most Wanted) cached for 5 minutes
+        # 2. Dynamic data (Most Wanted). Deliberately TTL-only in production —
+        # see core.cache — so this TTL *is* the staleness window, kept short
+        # while the dataset is small.
         waitlist_cache_key = "home_waitlist"
         waitlist = cache.get(waitlist_cache_key)
 
         if waitlist is None:
             top_books = Subscription.objects.values('book__title').annotate(count=Count('user')).order_by('-count')[:7]
             waitlist = [{"title": item['book__title'], "count": item['count']} for item in top_books]
-            cache.set(waitlist_cache_key, waitlist, timeout=300)  # 5 minutes
+            cache.set(waitlist_cache_key, waitlist, timeout=HOME_WAITLIST_TTL)
 
         # 3. Combine and return
         response_data = {

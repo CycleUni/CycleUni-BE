@@ -72,6 +72,7 @@ CRON_SECRET = env.str("CRON_SECRET", default="")
 
 # ---- Non-secret general configuration: safe defaults allowed ----
 DEBUG = env.bool("DEBUG", default=False)
+
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=[])
 _cors_origins = env.list("CORS_ALLOWED_ORIGINS", default=[])
 if "*" in _cors_origins:
@@ -317,6 +318,10 @@ REST_FRAMEWORK = {
         'password_change': '5/min',
         'password-reset-request': '3/hour',
         'cron': '60/hour',
+        # Listing/chat image uploads (presign, direct-proxy and delete).
+        # Generous enough for a 6-photo listing plus edits, but bounded so a
+        # logged-in account can't run up storage costs by looping uploads.
+        'upload': '100/hour',
     },
 }
 
@@ -328,6 +333,10 @@ AUTHENTICATION_BACKENDS = (
 )
 
 ACCOUNT_USER_MODEL_USERNAME_FIELD = None
+# allauth >=65 reads LOGIN_METHODS / SIGNUP_FIELDS and only falls back to the
+# deprecated ACCOUNT_AUTHENTICATION_METHOD / ACCOUNT_EMAIL_REQUIRED /
+# ACCOUNT_USERNAME_REQUIRED when these are absent. Since they're set here,
+# those three are never read — don't re-add them.
 ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']
 ACCOUNT_LOGIN_METHODS = {'email'}
 

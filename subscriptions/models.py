@@ -4,6 +4,10 @@ from django.db.models import Count, F, Q
 from django.conf import settings
 from catalog.models import Book
 from accounts.models import School
+from django.db.models.signals import post_save, post_delete
+from django.dispatch import receiver
+
+from core.cache import safe_cache_delete
 
 
 def subscriptions_with_new_listings_count(queryset):
@@ -33,3 +37,8 @@ class Subscription(models.Model):
 
     def __str__(self):
         return f"{self.user.email} -> {self.book.title}"
+
+@receiver([post_save, post_delete], sender=Subscription)
+def invalidate_home_waitlist_cache(sender, **kwargs):
+    """Bust the homepage "most wanted" list when a subscription changes."""
+    safe_cache_delete("home_waitlist")

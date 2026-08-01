@@ -243,6 +243,11 @@ def test_listing_upload_presign_returns_r2_put_url_when_configured(api, seller, 
     # Presigned-URL generation is pure local HMAC signing (no network call
     # to R2), so this can be verified without real credentials. R2 doesn't
     # support S3 POST policies (returns 501), so this is a presigned PUT.
+    # Rebind STORAGES wholesale rather than mutating settings.STORAGES["default"]
+    # in place: the `settings` fixture only rolls back attributes that were
+    # *assigned*, so an in-place nested mutation would leak the fake S3 backend
+    # into every later test in the session.
+    settings.STORAGES = {**settings.STORAGES}
     settings.STORAGES["default"] = {
         "BACKEND": "storages.backends.s3.S3Storage",
         "OPTIONS": {
@@ -266,9 +271,15 @@ def test_listing_upload_presign_returns_r2_put_url_when_configured(api, seller, 
     assert resp.status_code == 200
     data = resp.json()
     assert data["mode"] == "presigned_put"
-    assert data["upload_url"].startswith("https://fake-account.r2.cloudflarestorage.com/fake-bucket/listings/")
+    # Uploads land under a per-user tmp/ prefix: `tmp/` is what R2's
+    # lifecycle rule reaps, and the uploader's id is what lets
+    # ListingUploadDeleteView prove ownership of a not-yet-attached file.
+    tmp_prefix = f"tmp/listings/{seller.id}/"
+    assert data["upload_url"].startswith(
+        f"https://fake-account.r2.cloudflarestorage.com/fake-bucket/{tmp_prefix}"
+    )
     assert "X-Amz-Signature" in data["upload_url"]
-    assert data["photo_url"].startswith("https://media.example.invalid/listings/")
+    assert data["photo_url"].startswith(f"https://media.example.invalid/{tmp_prefix}")
     assert data["photo_url"].endswith(".jpg")
 
 
@@ -278,6 +289,170 @@ def test_listing_upload_direct_rejects_non_image_file(api, seller):
     resp = api.post("/api/v1/listings/uploads/direct/", {"file": f}, **bearer(seller))
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "listing.errUnsupportedFileType"
+
+
+# ---------------------------------------------------------------------
+# Upload deletion (ownership). Every path here is fail-closed: anything not
+# provably the caller's own must be refused, and the object must survive.
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def stored_file():
+    """Writes real objects into the test storage and cleans them up after."""
+    from django.core.files.base import ContentFile
+    from django.core.files.storage import default_storage
+
+    created = []
+
+    def _store(key):
+        name = default_storage.save(key, ContentFile(b"fake-image-bytes"))
+        created.append(name)
+        return name
+
+    yield _store
+
+    for name in created:
+        if default_storage.exists(name):
+            default_storage.delete(name)
+
+
+def _media_url(key):
+    return f"http://testserver/media/{key}"
+
+
+def test_upload_delete_rejects_foreign_host_even_when_file_is_unattached(api, buyer, seller, listing, stored_file):
+    """The original exploit: the ownership lookup matched on the full URL
+    string, so swapping only the hostname made it find no listing — which
+    skipped the check entirely — while the key was still derived from the
+    path alone. Any logged-in user could delete any listing photo."""
+    from django.core.files.storage import default_storage
+
+    key = stored_file("listings/victim-photo.jpg")
+    listing.photos = [_media_url(key)]
+    listing.save(update_fields=["photos"])
+
+    resp = api.delete(
+        f"/api/v1/listings/uploads/delete/?url=http://evil.example/media/{key}",
+        **bearer(buyer),
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "listing.errPhotoHostNotAllowed"
+    assert default_storage.exists(key), "victim's photo must survive"
+
+
+def test_upload_delete_rejects_another_users_tmp_upload(api, buyer, seller, stored_file):
+    from django.core.files.storage import default_storage
+
+    key = stored_file(f"tmp/listings/{seller.id}/pending.jpg")
+    resp = api.delete(f"/api/v1/listings/uploads/delete/?url={_media_url(key)}", **bearer(buyer))
+
+    assert resp.status_code == 403
+    assert default_storage.exists(key)
+
+
+def test_upload_delete_allows_own_tmp_upload(api, seller, stored_file):
+    from django.core.files.storage import default_storage
+
+    key = stored_file(f"tmp/listings/{seller.id}/pending.jpg")
+    resp = api.delete(f"/api/v1/listings/uploads/delete/?url={_media_url(key)}", **bearer(seller))
+
+    assert resp.status_code == 204
+    assert not default_storage.exists(key)
+
+
+def test_upload_delete_allows_photo_on_own_listing(api, seller, listing, stored_file):
+    from django.core.files.storage import default_storage
+
+    key = stored_file("listings/mine.jpg")
+    listing.photos = [_media_url(key)]
+    listing.save(update_fields=["photos"])
+
+    resp = api.delete(f"/api/v1/listings/uploads/delete/?url={_media_url(key)}", **bearer(seller))
+
+    assert resp.status_code == 204
+    assert not default_storage.exists(key)
+
+
+def test_upload_delete_rejects_photo_on_another_users_listing(api, buyer, listing, stored_file):
+    from django.core.files.storage import default_storage
+
+    key = stored_file("listings/not-yours.jpg")
+    listing.photos = [_media_url(key)]
+    listing.save(update_fields=["photos"])
+
+    resp = api.delete(f"/api/v1/listings/uploads/delete/?url={_media_url(key)}", **bearer(buyer))
+
+    assert resp.status_code == 403
+    assert default_storage.exists(key)
+
+
+def test_upload_delete_rejects_unattached_permanent_key(api, seller, stored_file):
+    """A `listings/` object nobody references can't be attributed to anyone,
+    so it must be refused rather than deleted by whoever asks first."""
+    from django.core.files.storage import default_storage
+
+    key = stored_file("listings/orphan.jpg")
+    resp = api.delete(f"/api/v1/listings/uploads/delete/?url={_media_url(key)}", **bearer(seller))
+
+    assert resp.status_code == 403
+    assert default_storage.exists(key)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://testserver/media/listings/../../../etc/passwd",
+        "http://testserver/media/listings/%2e%2e/%2e%2e/etc/passwd",
+    ],
+)
+def test_upload_delete_rejects_path_traversal(api, seller, url):
+    resp = api.delete(f"/api/v1/listings/uploads/delete/?url={url}", **bearer(seller))
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------
+# tmp/ promotion on listing create
+# ---------------------------------------------------------------------
+
+
+def test_listing_create_promotes_own_tmp_photo(api, seller, book, stored_file):
+    from django.core.files.storage import default_storage
+
+    key = stored_file(f"tmp/listings/{seller.id}/new.jpg")
+    resp = api.post(
+        "/api/v1/listings/",
+        {"book": book.id, "price": 120, "condition": "new", "photos": [_media_url(key)]},
+        content_type="application/json",
+        **bearer(seller),
+    )
+
+    assert resp.status_code == 201
+    photos = resp.json()["photos"]
+    # Must end up on a permanent key — R2's lifecycle rule deletes tmp/ after
+    # 7 days, so a listing left pointing at tmp/ would break next week.
+    assert photos[0] == _media_url("listings/new.jpg")
+    assert default_storage.exists("listings/new.jpg")
+    assert not default_storage.exists(key)
+    default_storage.delete("listings/new.jpg")
+
+
+def test_listing_create_rejects_another_users_tmp_photo(api, seller, buyer, book, stored_file):
+    """Promotion does copy+delete, so adopting someone else's pending upload
+    would also destroy it for them."""
+    from django.core.files.storage import default_storage
+
+    key = stored_file(f"tmp/listings/{seller.id}/pending.jpg")
+    resp = api.post(
+        "/api/v1/listings/",
+        {"book": book.id, "price": 120, "condition": "new", "photos": [_media_url(key)]},
+        content_type="application/json",
+        **bearer(buyer),
+    )
+
+    assert resp.status_code == 400
+    assert default_storage.exists(key), "the real uploader's file must survive"
 
 
 # ---------------------------------------------------------------------

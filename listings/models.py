@@ -6,7 +6,11 @@ from django.db import models
 from django.conf import settings
 from django.core.files.storage import default_storage
 
+from django.db.models.signals import post_save, post_delete
+from django.dispatch import receiver
+
 from catalog.models import Book
+from core.cache import bump_cache_version
 
 logger = logging.getLogger(__name__)
 
@@ -86,3 +90,24 @@ class Listing(models.Model):
                     )
 
         return super().delete(*args, **kwargs)
+
+@receiver([post_save, post_delete], sender=Listing)
+def invalidate_listing_caches(sender, instance, **kwargs):
+    """Drop every cached view that could now be stale, in every environment.
+
+    Bumping generations rather than deleting keys is what makes this possible
+    at all: `listing_list` and `book_detail` keys embed page/school/language/
+    limit, so there is no finite set of keys to delete (see core.cache).
+
+    This covers the order flow for free — accepting or completing an order
+    calls `listing.save(update_fields=['status'])`, so post_save fires and the
+    listing stops being advertised as available without any cache bookkeeping
+    at the order call site.
+    """
+    bump_cache_version('listing_list')
+    bump_cache_version(f'listing:{instance.pk}')
+    # A book's detail page embeds its listings, so a sold or deleted listing
+    # must invalidate it too — otherwise buyers keep seeing, and messaging
+    # sellers about, an item that is already gone. Deliberately one shared
+    # generation rather than per-book; see catalog.views.BookDetailView.
+    bump_cache_version('book_detail')

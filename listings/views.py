@@ -1,11 +1,31 @@
+import uuid
+
 from rest_framework import views, status
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.core.cache import cache
+from django.core.files.storage import default_storage
 from listings.models import Listing
 from listings.serializers import ListingSerializer
 
 from rest_framework.throttling import ScopedRateThrottle
+
+# Extension is derived from this allowlist, never from the client-supplied
+# filename or Content-Type header alone (both are trivially spoofable). The
+# presigned-upload path (ListingUploadURLView) can only check the declared
+# Content-Type up front — the file never touches this server — so R2's own
+# `Content-Type` condition is what actually enforces it at upload time. The
+# direct-proxy fallback (ListingUploadDirectView, dev-only) additionally
+# decodes the bytes with Pillow since it does receive them.
+from core.uploads import (
+    ALLOWED_CONTENT_TYPES,
+    MAX_UPLOAD_SIZE_BYTES,
+    detect_image_extension,
+    r2_client_and_options,
+    storage_key_from_url,
+)
+from core.cache import HOME_RECENT_TTL, LISTING_CACHE_TTL, versioned_key
+from listings.utils import PERMANENT_LISTING_PREFIX, tmp_key_prefix
 
 class ListingListCreateView(views.APIView):
     permission_classes = [AllowAny]
@@ -25,7 +45,7 @@ class ListingListCreateView(views.APIView):
         seller_id = request.query_params.get('seller_id', '')
         page_param = request.query_params.get('page', '1')
         
-        cache_key = f"listing_list_{lang}_{school}_{seller_id}_{page_param}"
+        cache_key = versioned_key('listing_list', lang, school, seller_id, page_param)
         cached_data = cache.get(cache_key)
         if cached_data is not None:
             return Response(cached_data)
@@ -46,12 +66,12 @@ class ListingListCreateView(views.APIView):
         if page is not None:
             serializer = ListingSerializer(page, many=True, context={'request': request})
             response_data = paginator.get_paginated_response(serializer.data).data
-            cache.set(cache_key, response_data, timeout=60)
+            cache.set(cache_key, response_data, timeout=LISTING_CACHE_TTL)
             return Response(response_data)
             
         serializer = ListingSerializer(listings, many=True, context={'request': request})
         response_data = serializer.data
-        cache.set(cache_key, response_data, timeout=60)
+        cache.set(cache_key, response_data, timeout=LISTING_CACHE_TTL)
         return Response(response_data)
 
     def post(self, request):
@@ -143,43 +163,8 @@ class RecentBooksView(views.APIView):
         else:
             response_data = results
             
-        cache.set(cache_key, response_data, timeout=300)
+        cache.set(cache_key, response_data, timeout=HOME_RECENT_TTL)
         return Response(response_data)
-# Extension is derived from this allowlist, never from the client-supplied
-# filename or Content-Type header alone (both are trivially spoofable). The
-# presigned-upload path (ListingUploadURLView) can only check the declared
-# Content-Type up front — the file never touches this server — so R2's own
-# POST-policy `Content-Type` condition is what actually enforces it at
-# upload time. The direct-proxy fallback (ListingUploadDirectView, dev-only)
-# additionally decodes the bytes with Pillow since it does receive them.
-_ALLOWED_CONTENT_TYPES = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif'}
-_ALLOWED_IMAGE_FORMATS = {'JPEG': 'jpg', 'PNG': 'png', 'WEBP': 'webp', 'GIF': 'gif'}
-_MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024  # 5MB, matches the ≤6 photos / ≤5MB policy
-
-
-def _r2_client_and_options():
-    """Returns (boto3 S3 client, OPTIONS dict) if STORAGES["default"] is the
-    R2/S3 backend, else (None, None) — the local FileSystemStorage dev
-    fallback has no S3-compatible endpoint to presign against."""
-    from django.conf import settings
-
-    default_storage_config = settings.STORAGES["default"]
-    if default_storage_config["BACKEND"] != "storages.backends.s3.S3Storage":
-        return None, None
-
-    import boto3
-    from botocore.config import Config
-
-    options = default_storage_config["OPTIONS"]
-    client = boto3.client(
-        "s3",
-        endpoint_url=options["endpoint_url"],
-        aws_access_key_id=options["access_key"],
-        aws_secret_access_key=options["secret_key"],
-        region_name=options.get("region_name", "auto"),
-        config=Config(signature_version=options.get("signature_version", "s3v4")),
-    )
-    return client, options
 
 
 class ListingUploadURLView(views.APIView):
@@ -188,7 +173,7 @@ class ListingUploadURLView(views.APIView):
     (R2 doesn't support S3 POST policies, which is what would otherwise let
     a presigned upload enforce a server-side size limit via a
     `content-length-range` condition — a plain presigned PUT can't do that,
-    so `_MAX_UPLOAD_SIZE_BYTES` is enforced only on the ListingUploadDirectView
+    so `MAX_UPLOAD_SIZE_BYTES` is enforced only on the ListingUploadDirectView
     fallback below, not on real R2 uploads. Closing that gap needs either an
     R2 event notification that deletes oversized objects after the fact, or
     routing uploads through a Worker that can inspect Content-Length.)
@@ -199,21 +184,21 @@ class ListingUploadURLView(views.APIView):
     endpoint to presign against in that case.
     """
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'upload'
 
     def post(self, request):
-        import uuid
-
         content_type = request.data.get('content_type')
-        ext = _ALLOWED_CONTENT_TYPES.get(content_type)
+        ext = ALLOWED_CONTENT_TYPES.get(content_type)
         if not ext:
             return Response({"error": {"code": "listing.errUnsupportedFileType"}}, status=status.HTTP_400_BAD_REQUEST)
 
-        client, options = _r2_client_and_options()
+        client, options = r2_client_and_options()
         if client is None:
             return Response({"mode": "direct"})
 
-        key = f"listings/{uuid.uuid4().hex}.{ext}"
-        
+        key = f"{tmp_key_prefix(request.user.id)}{uuid.uuid4().hex}.{ext}"
+
         # Cloudflare R2 does not support S3 POST policies (returns 501).
         # We must use PUT presigned URLs instead.
         upload_url = client.generate_presigned_url(
@@ -241,40 +226,72 @@ class ListingUploadDirectView(views.APIView):
     FileSystemStorage when R2 isn't configured. The frontend only calls this
     when ListingUploadURLView responded with `mode: "direct"`."""
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'upload'
 
     def post(self, request):
-        from django.core.files.storage import default_storage
-        import uuid
-        from PIL import Image, UnidentifiedImageError
-
         file = request.FILES.get('file')
         if not file:
             return Response({"error": {"code": "listing.errNoFile"}}, status=status.HTTP_400_BAD_REQUEST)
 
-        if file.size > _MAX_UPLOAD_SIZE_BYTES:
+        if file.size > MAX_UPLOAD_SIZE_BYTES:
             return Response({"error": {"code": "listing.errFileTooLarge"}}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Decode the actual bytes rather than trusting the client's declared
-        # Content-Type or filename extension — closes off disguised-file
-        # uploads (e.g. an HTML/SVG payload renamed to photo.jpg, which
-        # browsers may still sniff and execute, i.e. stored XSS via listing
-        # photos). image.format is Pillow's own detection from the file
-        # header, not an echo of client input.
-        try:
-            image = Image.open(file)
-            image.verify()
-            ext = _ALLOWED_IMAGE_FORMATS.get(image.format)
-        except (UnidentifiedImageError, OSError):
-            ext = None
+        ext = detect_image_extension(file)
         if not ext:
             return Response({"error": {"code": "listing.errUnsupportedFileType"}}, status=status.HTTP_400_BAD_REQUEST)
-        file.seek(0)
 
-        filename = f"listings/{uuid.uuid4().hex}.{ext}"
+        filename = f"{tmp_key_prefix(request.user.id)}{uuid.uuid4().hex}.{ext}"
         path = default_storage.save(filename, file)
         url = request.build_absolute_uri(default_storage.url(path))
 
         return Response({"url": url})
+
+class ListingUploadDeleteView(views.APIView):
+    """Deletes an image the caller uploaded but hasn't attached to a listing
+    yet, or is removing from a listing they own.
+
+    Both paths are fail-closed — anything not provably the caller's is
+    refused rather than deleted:
+
+    - `tmp/listings/<user_id>/…` — only the user whose id is in the key.
+      Nothing else records who uploaded an unattached file, which is exactly
+      why the uploader's id is baked into the key at upload time.
+    - `listings/…` — only if a listing the caller owns actually references
+      this exact URL.
+
+    The URL's host is validated too (storage_key_from_url): deriving the key
+    from `path` alone would let anyone name any object in the bucket just by
+    swapping the hostname while keeping the path.
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'upload'
+
+    def delete(self, request):
+        url = request.query_params.get('url') or request.data.get('url')
+        if not url or not isinstance(url, str):
+            return Response({"error": {"code": "listing.errValidation"}}, status=status.HTTP_400_BAD_REQUEST)
+
+        key = storage_key_from_url(url, request)
+        if key is None:
+            return Response({"error": {"code": "listing.errPhotoHostNotAllowed"}}, status=status.HTTP_400_BAD_REQUEST)
+
+        if key.startswith(tmp_key_prefix(request.user.id)):
+            default_storage.delete(key)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        if key.startswith(f"{PERMANENT_LISTING_PREFIX}/"):
+            # icontains only narrows the candidate rows (JSONField has no
+            # cross-backend exact-membership lookup: `contains` is unsupported
+            # on SQLite). Exact membership is then confirmed in Python, so a
+            # substring collision can't authorise a delete.
+            candidates = Listing.objects.filter(seller=request.user, photos__icontains=url)
+            if any(url in (listing.photos or []) for listing in candidates):
+                default_storage.delete(key)
+                return Response(status=status.HTTP_204_NO_CONTENT)
+
+        return Response({"error": {"code": "listing.errPhotoNotOwned"}}, status=status.HTTP_403_FORBIDDEN)
 
 class ListingDetailView(views.APIView):
     permission_classes = [AllowAny]
@@ -294,7 +311,7 @@ class ListingDetailView(views.APIView):
         from core.i18n import resolve_language
         lang = resolve_language(request)
         
-        cache_key = f"listing_detail_{lang}_{pk}"
+        cache_key = versioned_key(f'listing:{pk}', lang)
         cached_data = cache.get(cache_key)
         if cached_data is not None:
             return Response(cached_data)
@@ -304,7 +321,7 @@ class ListingDetailView(views.APIView):
              return Response(status=status.HTTP_404_NOT_FOUND)
         serializer = ListingSerializer(listing, context={'request': request})
         response_data = serializer.data
-        cache.set(cache_key, response_data, timeout=60)
+        cache.set(cache_key, response_data, timeout=LISTING_CACHE_TTL)
         return Response(response_data)
 
     def patch(self, request, pk):
@@ -332,13 +349,10 @@ class ListingDetailView(views.APIView):
 
         serializer = ListingSerializer(listing, data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
+             # Cache invalidation (every language variant, the listing lists
+             # and the book page) happens in the post_save signal — see
+             # listings.models.invalidate_listing_caches.
              serializer.save()
-             # We should probably clear all language variants for this listing, but since we don't track them,
-             # cache will naturally expire in 60s. We can clear the default ones if we want, or clear via pattern.
-             # Django's default cache doesn't easily support pattern deletion.
-             # We'll rely on the 60s timeout for full consistency, or clear common languages.
-             for l in ['zh-TW', 'en']:
-                 cache.delete(f"listing_detail_{l}_{pk}")
              return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -347,9 +361,7 @@ class ListingDetailView(views.APIView):
         if not listing:
             return Response(status=status.HTTP_404_NOT_FOUND)
         book = listing.book
-        listing.delete()
-        for l in ['zh-TW', 'en']:
-            cache.delete(f"listing_detail_{l}_{pk}")
+        listing.delete()  # post_delete signal invalidates the caches
 
         # If the book now has zero listings and zero subscriptions,
         # it’s an orphan — delete it immediately so the catalog

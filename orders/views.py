@@ -194,13 +194,10 @@ class OrderViewSet(viewsets.ModelViewSet):
             order.listing.save(update_fields=['status'])
             listing_status_changed = True
             
-        if listing_status_changed:
-            from django.core.cache import cache
-            # Key must match how listings/views.py's ListingDetailView writes
-            # it (per-language prefix) or this delete is a silent no-op.
-            for lang in ['zh-TW', 'en']:
-                cache.delete(f"listing_detail_{lang}_{order.listing.id}")
-        
+        # No cache bookkeeping needed here: the listing.save() calls above fire
+        # post_save, and listings.models.invalidate_listing_caches bumps every
+        # affected generation (detail, lists, and the book page).
+
         if old_status != new_status:
             self._send_meetup_notification(order, old_status, new_status)
     

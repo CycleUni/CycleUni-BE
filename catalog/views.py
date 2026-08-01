@@ -10,6 +10,8 @@ from catalog.services import (
 from listings.serializers import ListingSerializer
 from django.core.cache import cache
 
+from core.cache import BOOK_DETAIL_CACHE_TTL, versioned_key
+
 class BookDetailView(views.APIView):
     permission_classes = [AllowAny]
 
@@ -26,7 +28,18 @@ class BookDetailView(views.APIView):
             from catalog.services import clean_and_validate_isbn
             valid_isbn = clean_and_validate_isbn(isbn)
 
-        cache_key = f"book_detail_{book_id or ''}_{valid_isbn or ''}_{page_param}"
+        # One generation for all book pages rather than one per book: this
+        # endpoint is usually addressed by ISBN (see the frontend's goToBook),
+        # and the post_save signal only cheaply knows the listing's book_id,
+        # so a per-book generation would silently miss the common path. Any
+        # listing write therefore invalidates every book page — acceptable
+        # while the catalog is small (each page costs one rebuild), and worth
+        # revisiting for a per-book generation if book traffic grows.
+        #
+        # The `page` component is why this needs a generation at all: it made
+        # the key space unbounded, so these entries could never be invalidated
+        # and a sold or deleted listing stayed advertised until the TTL lapsed.
+        cache_key = versioned_key("book_detail", book_id or '', valid_isbn or '', page_param)
         data = cache.get(cache_key)
 
         book = None
@@ -100,7 +113,7 @@ class BookDetailView(views.APIView):
                         'results': ListingSerializer(active_listings, many=True, context={'request': request}).data
                     }
                 data['waiting_count'] = book.subscriptions.count()
-                cache.set(cache_key, data, timeout=60)
+                cache.set(cache_key, data, timeout=BOOK_DETAIL_CACHE_TTL)
             
             except (Book.DoesNotExist, ValueError):
                 return Response({"error": {"code": "not_found", "message": "Book not found"}}, status=status.HTTP_404_NOT_FOUND)

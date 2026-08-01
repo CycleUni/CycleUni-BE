@@ -1,29 +1,16 @@
 from urllib.parse import urlparse
 
-from django.conf import settings
 from rest_framework import serializers
 from listings.models import Listing
 
 from core.models import Category
+# Shared with messaging/ — `photos` is populated straight from client input,
+# not derived from the upload endpoints, so without a host allowlist it could
+# point anywhere (a tracking pixel or phishing image on an attacker domain).
+from core.uploads import allowed_storage_hosts
+from listings.utils import promote_tmp_photos
 
 MAX_LISTING_PHOTOS = 6
-
-
-def _allowed_photo_hosts(request):
-    """Hosts a listing photo URL is allowed to point at: the configured R2
-    custom domain in production, or this server's own host in local dev
-    (FileSystemStorage fallback serves uploads same-origin under /media/).
-    Without this, `photos` — populated straight from client input, not
-    derived from the upload endpoints — could point anywhere, e.g. a
-    tracking pixel or phishing image on an attacker-controlled domain."""
-    hosts = set()
-    storage = settings.STORAGES.get("default", {})
-    custom_domain = storage.get("OPTIONS", {}).get("custom_domain")
-    if custom_domain:
-        hosts.add(custom_domain.lower())
-    if request is not None:
-        hosts.add(request.get_host().split(':')[0].lower())
-    return hosts
 
 
 class ListingSerializer(serializers.ModelSerializer):
@@ -84,7 +71,7 @@ class ListingSerializer(serializers.ModelSerializer):
         if len(value) > MAX_LISTING_PHOTOS:
             raise serializers.ValidationError('listing.errTooManyPhotos')
 
-        allowed_hosts = _allowed_photo_hosts(self.context.get('request'))
+        allowed_hosts = allowed_storage_hosts(self.context.get('request'))
         for url in value:
             if not isinstance(url, str):
                 raise serializers.ValidationError('listing.errInvalidPhotos')
@@ -106,3 +93,26 @@ class ListingSerializer(serializers.ModelSerializer):
             return school.localized_name(lang)
         return school.name
 
+    def _promote_photos(self, validated_data):
+        """Move freshly-uploaded `tmp/` photos to their permanent keys.
+
+        Scoped to the requesting user so a listing can't adopt someone else's
+        pending upload — see listings.utils.promote_tmp_photos.
+        """
+        if 'photos' not in validated_data:
+            return
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if user is None or not user.is_authenticated:
+            raise serializers.ValidationError('listing.errInvalidPhotos')
+        validated_data['photos'] = promote_tmp_photos(
+            validated_data['photos'], user.id, request=request
+        )
+
+    def create(self, validated_data):
+        self._promote_photos(validated_data)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        self._promote_photos(validated_data)
+        return super().update(instance, validated_data)
