@@ -31,7 +31,10 @@ class AdminUserSerializer(serializers.ModelSerializer):
     is_verified = serializers.SerializerMethodField()
 
     def get_school_name(self, obj):
-        return obj.school.name if obj.school else ''
+        if not obj.school:
+            return ''
+        lang = self.context.get('lang')
+        return obj.school.localized_name(lang) if lang else obj.school.name
 
     def get_is_verified(self, obj):
         return obj.is_verified()

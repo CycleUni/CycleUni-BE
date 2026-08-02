@@ -8,6 +8,7 @@ from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 
 from accounts.models import School, User
+from core.i18n import resolve_language
 from core.models import AuditEvent
 
 from ..serializers import AdminUserSerializer
@@ -26,6 +27,11 @@ class AdminUserListView(generics.ListAPIView):
     permission_classes = [IsAdminUser]
     serializer_class = AdminUserSerializer
     pagination_class = PageNumberPagination
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['lang'] = resolve_language(self.request)
+        return context
 
     def get_queryset(self):
         qs = User.objects.select_related('school').order_by('-created_at')
@@ -53,6 +59,11 @@ class AdminUserDetailView(generics.RetrieveUpdateAPIView):
     queryset = User.objects.select_related('school').all()
     lookup_field = 'pk'
     http_method_names = ['get', 'patch']
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['lang'] = resolve_language(self.request)
+        return context
 
     def patch(self, request, *args, **kwargs):
         forbidden = FORBIDDEN_USER_FIELDS & set(request.data.keys())
@@ -127,4 +138,4 @@ class AdminUserDetailView(generics.RetrieveUpdateAPIView):
             meta={'target_user_id': instance.id, 'changes': changes},
         )
 
-        return Response(AdminUserSerializer(instance).data)
+        return Response(AdminUserSerializer(instance, context=self.get_serializer_context()).data)
