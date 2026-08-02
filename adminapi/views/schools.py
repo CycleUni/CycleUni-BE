@@ -1,0 +1,101 @@
+import logging
+
+from rest_framework import generics, status, views
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import IsAdminUser
+from rest_framework.response import Response
+
+from accounts.models import School
+from accounts.views import invalidate_home_static_cache
+
+from ..serializers import AdminSchoolSerializer
+
+logger = logging.getLogger(__name__)
+
+
+class AdminSchoolListView(generics.ListCreateAPIView):
+    """GET / POST /api/v1/admin/schools/"""
+    permission_classes = [IsAdminUser]
+    serializer_class = AdminSchoolSerializer
+    pagination_class = PageNumberPagination
+    queryset = School.objects.all().order_by('id')
+
+    def perform_create(self, serializer):
+        serializer.save()
+        invalidate_home_static_cache()
+
+
+class AdminSchoolDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """GET / PATCH / DELETE /api/v1/admin/schools/<id>/"""
+    permission_classes = [IsAdminUser]
+    serializer_class = AdminSchoolSerializer
+    queryset = School.objects.all()
+    http_method_names = ['get', 'patch', 'delete']
+
+    def perform_update(self, serializer):
+        serializer.save()
+        invalidate_home_static_cache()
+
+    def perform_destroy(self, instance):
+        instance.delete()
+        invalidate_home_static_cache()
+
+
+class AdminSchoolBulkImportView(views.APIView):
+    """POST /api/v1/admin/schools/bulk/"""
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        action = request.data.get('action') # 'preview' or 'apply'
+        items = request.data.get('items', [])
+
+        if not isinstance(items, list):
+            return Response({"error": "Items must be a list"}, status=status.HTTP_400_BAD_REQUEST)
+
+        new_items = []
+        unchanged_items = []
+        modified_items = []
+
+        # Build map of existing schools by email_domain
+        existing_schools = {s.email_domain: s for s in School.objects.all()}
+
+        for idx, item in enumerate(items):
+            domain = item.get('email_domain')
+            if not domain:
+                continue
+
+            existing = existing_schools.get(domain)
+            if not existing:
+                new_items.append(item)
+                if action == 'apply':
+                    School.objects.create(
+                        name=item.get('name', ''),
+                        email_domain=domain,
+                        translations=item.get('translations', {})
+                    )
+            else:
+                # Check for changes
+                name = item.get('name', existing.name)
+                translations = item.get('translations', existing.translations)
+
+                is_changed = existing.name != name or existing.translations != translations
+                if is_changed:
+                    modified_items.append({
+                        'old': AdminSchoolSerializer(existing).data,
+                        'new': item
+                    })
+                    if action == 'apply':
+                        existing.name = name
+                        existing.translations = translations
+                        existing.save()
+                else:
+                    unchanged_items.append(item)
+
+        if action == 'apply' and (new_items or modified_items):
+            invalidate_home_static_cache()
+
+        return Response({
+            "new": new_items,
+            "modified": modified_items,
+            "unchanged": unchanged_items
+        })

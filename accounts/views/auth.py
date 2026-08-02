@@ -1,8 +1,8 @@
 import logging
 import uuid
+
 from django.utils.translation import gettext_lazy as _
 
-from django.db.models import Count
 from rest_framework import status, views
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -13,7 +13,6 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.cache import cache
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.core.mail import send_mail
 from django.conf import settings
 from django.utils import timezone
 
@@ -27,12 +26,7 @@ from accounts.services import (
     email_already_used,
 )
 from accounts.models import School
-from core.cache import HOME_STATIC_TTL, HOME_WAITLIST_TTL
 from core.i18n import resolve_language
-from core.models import Category
-from listings.serializers import ListingSerializer
-from subscriptions.models import Subscription, subscriptions_with_new_listings_count
-from subscriptions.serializers import SubscriptionSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +103,7 @@ class RequestEduVerificationView(views.APIView):
         # Ensure the school is supported by checking if it exists in the database
         edu_email = edu_email.strip().lower()
         domain = edu_email.split('@')[-1]
-        
+
         parts = domain.split('.')
         school_exists = False
         for i in range(len(parts) - 1):
@@ -117,7 +111,7 @@ class RequestEduVerificationView(views.APIView):
             if School.objects.filter(email_domain__iexact=sub_domain).exists():
                 school_exists = True
                 break
-                
+
         if not school_exists:
             return Response({"error": {"code": "acct.errSchoolNotSupported"}}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -155,11 +149,11 @@ class AutoVerifyEduEmailView(views.APIView):
         user = request.user
         if user.verified_at:
             return Response({"code": "acct.verifySuccess"})
-            
+
         email = user.email.strip().lower()
         if not email.endswith('.edu.tw'):
             return Response({"error": {"code": "acct.errEduEmail"}}, status=status.HTTP_400_BAD_REQUEST)
-            
+
         domain = email.split('@')[-1]
         parts = domain.split('.')
         school = None
@@ -170,10 +164,10 @@ class AutoVerifyEduEmailView(views.APIView):
                 break
             except School.DoesNotExist:
                 continue
-                
+
         if not school:
             return Response({"error": {"code": "acct.errSchoolNotSupported"}}, status=status.HTTP_400_BAD_REQUEST)
-            
+
         # Check if email is already in use by someone else as edu_email
         if email_already_used(email, user.id):
             return Response({"error": {"code": "acct.errEmailTaken"}}, status=status.HTTP_400_BAD_REQUEST)
@@ -182,7 +176,7 @@ class AutoVerifyEduEmailView(views.APIView):
         user.verified_at = timezone.now()
         user.school = school
         user.save(update_fields=['edu_email', 'verified_at', 'school'])
-        
+
         return Response({"code": "acct.verifySuccess"})
 
 
@@ -205,7 +199,7 @@ class VerifyEmailView(views.APIView):
             user = User.objects.get(id=user_id)
             user.verified_at = timezone.now()
             user.edu_email = edu_email
-            
+
             domain = edu_email.split('@')[-1].lower() if edu_email and '@' in edu_email else None
             if domain:
                 from accounts.models import School
@@ -362,25 +356,25 @@ class GoogleLoginView(views.APIView):
             # We monkey-patch PyJWT momentarily to add 5 seconds of leeway for clock skew (iat)
             import jwt
             _original_jwt_decode = jwt.decode
-            
+
             def _jwt_decode_with_leeway(*args, **kwargs):
                 kwargs.setdefault('leeway', 5)
                 return _original_jwt_decode(*args, **kwargs)
-                
+
             jwt.decode = _jwt_decode_with_leeway
             try:
                 idinfo = _verify_and_decode(app, credential, verify_signature=True)
             finally:
                 jwt.decode = _original_jwt_decode
-                
+
             email = idinfo.get('email')
             if not email:
                 return Response({"error": {"code": "auth.errNoEmail"}}, status=status.HTTP_400_BAD_REQUEST)
-            
+
             uid = idinfo.get('sub')
             first_name = idinfo.get('given_name', '')
             last_name = idinfo.get('family_name', '')
-            
+
             avatar_url = idinfo.get('picture', '')
 
             # Find or create user
@@ -398,7 +392,7 @@ class GoogleLoginView(views.APIView):
             if created:
                 user.set_unusable_password()
                 user.save()
-            
+
             # Block login for disabled accounts (except superusers).
             # No auto-reactivation: once an admin disables an account,
             # Google login alone does not bypass the block.
@@ -451,12 +445,10 @@ class GoogleLoginView(views.APIView):
                     "is_verified": user.is_verified()
                 }
             }, status=status.HTTP_200_OK)
-            
+
         except Exception as e:
             logger.error(f"Google token verification failed: {e}", exc_info=True)
             return Response({"error": {"code": "auth.errInvalidToken"}}, status=status.HTTP_401_UNAUTHORIZED)
-
-
 
 
 class LogoutView(views.APIView):
@@ -495,126 +487,6 @@ class AuthConfigView(views.APIView):
             "google_client_id": getattr(settings, "GOOGLE_CLIENT_ID", "")
         })
 
-
-class MyProfileView(views.APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        user = request.user
-        serializer = UserSerializer(user, context={'request': request})
-        data = serializer.data
-
-        # Related data the frontend My Account page needs
-        my_listings = user.listings.select_related('book', 'seller', 'school').order_by('-created_at')
-        
-        q = request.query_params.get('q', '').strip()
-        if q:
-            from django.db.models import Q
-            my_listings = my_listings.filter(
-                Q(book__title__icontains=q) | 
-                Q(book__authors__icontains=q) | 
-                Q(book__isbn13__icontains=q)
-            )
-            
-        from rest_framework.pagination import PageNumberPagination
-        paginator = PageNumberPagination()
-        page = paginator.paginate_queryset(my_listings, request)
-        
-        if page is not None:
-            data['myListings'] = {
-                'count': paginator.page.paginator.count,
-                'next': paginator.get_next_link(),
-                'previous': paginator.get_previous_link(),
-                'results': ListingSerializer(page, many=True, context={'request': request}).data
-            }
-        else:
-            data['myListings'] = {
-                'count': my_listings.count(),
-                'next': None,
-                'previous': None,
-                'results': ListingSerializer(my_listings, many=True, context={'request': request}).data
-            }
-
-        my_subs = subscriptions_with_new_listings_count(user.subscriptions.all())
-        data['mySubscriptions'] = SubscriptionSerializer(my_subs, many=True).data
-
-        return Response(data)
-
-    def patch(self, request):
-        user = request.user
-        first_name = request.data.get('first_name')
-        last_name = request.data.get('last_name')
-        email = request.data.get('email')
-        last_seen_bought_orders_at = request.data.get('last_seen_bought_orders_at')
-        last_seen_sold_orders_at = request.data.get('last_seen_sold_orders_at')
-        
-        if first_name is not None and not isinstance(first_name, str):
-            return Response({"first_name": [_("Invalid value.")]}, status=status.HTTP_400_BAD_REQUEST)
-        if last_name is not None and not isinstance(last_name, str):
-            return Response({"last_name": [_("Invalid value.")]}, status=status.HTTP_400_BAD_REQUEST)
-
-        updated_fields = []
-        if first_name is not None:
-            user.first_name = first_name.strip()
-            updated_fields.append('first_name')
-        if last_name is not None:
-            user.last_name = last_name.strip()
-            updated_fields.append('last_name')
-        if email is not None:
-            email = email.strip().lower()
-            if email != user.email:
-                if user.socialaccount_set.filter(provider='google').exists():
-                    return Response({"email": [_("You cannot change the email of a Google-linked account.")]}, status=status.HTTP_400_BAD_REQUEST)
-                if User.objects.filter(email__iexact=email).exclude(pk=user.pk).exists():
-                    return Response({"email": [_("Email is already in use.")]}, status=status.HTTP_400_BAD_REQUEST)
-                # A login email matching a supported school's domain is what
-                # AutoVerifyEduEmailView trusts to grant verified-student
-                # status with no further proof — so this endpoint must never
-                # let that value become one the user hasn't actually proven
-                # ownership of. Legitimate school-email logins are still
-                # possible (set at registration, proven via the activation
-                # link), just not by editing it in afterward.
-                new_domain = email.split('@')[-1] if '@' in email else ''
-                if School.objects.filter(email_domain__iexact=new_domain).exists():
-                    return Response({"error": {"code": "acct.errEduEmailChangeNotAllowed"}}, status=status.HTTP_400_BAD_REQUEST)
-                user.email = email
-                updated_fields.append('email')
-
-        from django.utils.dateparse import parse_datetime
-        if last_seen_bought_orders_at is not None:
-            parsed = parse_datetime(last_seen_bought_orders_at) if last_seen_bought_orders_at else None
-            user.last_seen_bought_orders_at = parsed
-            updated_fields.append('last_seen_bought_orders_at')
-        
-        if last_seen_sold_orders_at is not None:
-            parsed = parse_datetime(last_seen_sold_orders_at) if last_seen_sold_orders_at else None
-            user.last_seen_sold_orders_at = parsed
-            updated_fields.append('last_seen_sold_orders_at')
-            
-        if updated_fields:
-            user.save(update_fields=updated_fields)
-            
-        serializer = UserSerializer(user, context={'request': request})
-        return Response(serializer.data)
-
-    def delete(self, request):
-        user = request.user
-        user.delete()
-        return Response({"code": "acct.deleted"}, status=status.HTTP_204_NO_CONTENT)
-
-
-class PublicUserProfileView(views.APIView):
-    permission_classes = [AllowAny]
-
-    def get(self, request, pk):
-        try:
-            user = User.objects.get(pk=pk)
-        except User.DoesNotExist:
-            return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
-            
-        from accounts.serializers import PublicUserProfileSerializer
-        serializer = PublicUserProfileSerializer(user, context={'request': request})
-        return Response(serializer.data)
 
 class ChangePasswordView(views.APIView):
     permission_classes = [IsAuthenticated]
@@ -750,83 +622,3 @@ class UnbindEduEmailView(views.APIView):
         user.school = None
         user.save()
         return Response({"code": "acct.unbindSuccess"})
-
-
-# The only two languages the frontend ever requests (see
-# CycleUni-FE/src/app/core/i18n.service.ts) — kept in sync manually since
-# `translations` fields accept arbitrary language tags, but the UI itself
-# only ever renders these two, so only these two cache entries can exist.
-HOME_STATIC_CACHE_LANGUAGES = ('en', 'zh-TW')
-
-
-def invalidate_home_static_cache():
-    """Bust HomeMetadataView's 24h schools/categories cache. Call this
-    anywhere a School or Category row is created, updated, deleted, or
-    bulk-imported (adminapi.views) — otherwise admin changes don't show up
-    on the homepage for up to 24 hours."""
-    for lang in HOME_STATIC_CACHE_LANGUAGES:
-        cache.delete(f"home_static_{lang}")
-
-
-class HomeMetadataView(views.APIView):
-    """
-    Home page metadata (schools, categories, and most wanted books).
-
-    This view depends on `accounts.School` and `subscriptions.Subscription`. It is placed in
-    the `accounts` app instead of `core` to avoid circular dependencies and keep `core`
-    as an independent module. The URL remains `/api/v1/core/metadata/`.
-    """
-    permission_classes = [AllowAny]
-
-    def get(self, request):
-        lang = resolve_language(request)
-
-        # 1. Static data (Schools & Categories) cached for 24 hours
-        static_cache_key = f"home_static_{lang}"
-        static_data = cache.get(static_cache_key)
-
-        if not static_data:
-            schools = [
-                {
-                    'id': school.id,
-                    'name': school.name,
-                    'display_name': school.localized_name(lang),
-                    'email_domain': school.email_domain,
-                }
-                for school in School.objects.all()
-            ]
-
-            categories = [
-                category.localized(lang)
-                for category in Category.objects.filter(is_active=True)
-            ]
-
-            static_data = {
-                "schools": schools,
-                "categories": categories,
-            }
-            # Long TTL is safe here only because admin edits invalidate this
-            # immediately (invalidate_home_static_cache); it's a backstop, not
-            # the staleness window.
-            cache.set(static_cache_key, static_data, timeout=HOME_STATIC_TTL)
-
-        # 2. Dynamic data (Most Wanted). Deliberately TTL-only in production —
-        # see core.cache — so this TTL *is* the staleness window, kept short
-        # while the dataset is small.
-        waitlist_cache_key = "home_waitlist"
-        waitlist = cache.get(waitlist_cache_key)
-
-        if waitlist is None:
-            top_books = Subscription.objects.values('book__title').annotate(count=Count('user')).order_by('-count')[:7]
-            waitlist = [{"title": item['book__title'], "count": item['count']} for item in top_books]
-            cache.set(waitlist_cache_key, waitlist, timeout=HOME_WAITLIST_TTL)
-
-        # 3. Combine and return
-        response_data = {
-            "lang": lang,
-            "schools": static_data["schools"],
-            "categories": static_data["categories"],
-            "waitlist": waitlist
-        }
-
-        return Response(response_data)

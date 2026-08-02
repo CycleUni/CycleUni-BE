@@ -1,15 +1,15 @@
 import logging
 
 from django.conf import settings
-from rest_framework import serializers, viewsets, status, views
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.decorators import action
 from django.db.models import Q
-from .serializers import OrderSerializer, OrderStatusUpdateSerializer, ReviewSerializer
-from .models import Order, Review
+from rest_framework import viewsets, status
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
 
 from messaging.models import Conversation
+
+from ..models import Order
+from ..serializers import OrderSerializer, OrderStatusUpdateSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -153,9 +153,9 @@ class OrderViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         listing = serializer.validated_data['listing']
-        
+
         # In the new flow, we don't reserve immediately on request, wait for seller to accept.
-        
+
         order = serializer.save(
             buyer=self.request.user,
             seller=listing.seller,
@@ -178,7 +178,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         old_status = serializer.instance.status if serializer.instance else None
         order = serializer.save()
         new_status = order.status
-        
+
         # Handle listing status changes
         listing_status_changed = False
         if new_status == 'cancelled':
@@ -193,84 +193,48 @@ class OrderViewSet(viewsets.ModelViewSet):
             order.listing.status = 'sold'
             order.listing.save(update_fields=['status'])
             listing_status_changed = True
-            
+
         # No cache bookkeeping needed here: the listing.save() calls above fire
         # post_save, and listings.models.invalidate_listing_caches bumps every
         # affected generation (detail, lists, and the book page).
 
         if old_status != new_status:
             self._send_meetup_notification(order, old_status, new_status)
-    
+
     def _send_meetup_notification(self, order, old_status, new_status):
         """Send appropriate notification based on status transition."""
         user = self.request.user
-        
+
         # Map of status transitions to notification keys
         # Format: (old_status, new_status, sender) -> (message_key, sender_override)
         transitions = {
             # Seller approves meetup: pending -> accepted
             ('pending', 'accepted', order.seller): ('order.notify.seller_approved', order.seller),
-            
+
             # Buyer cancels while pending
             ('pending', 'cancelled', order.buyer): ('order.notify.cancelled_by_buyer', order.buyer),
-            
+
             # Seller rejects/cancels while pending
             ('pending', 'cancelled', order.seller): ('order.notify.seller_rejected', order.seller),
-            
+
             # Buyer cancels after seller approved (accepted)
             ('accepted', 'cancelled', order.buyer): ('order.notify.cancelled_by_buyer', order.buyer),
-            
+
             # Seller cancels after approving (accepted)
             ('accepted', 'cancelled', order.seller): ('order.notify.cancelled_by_seller', order.seller),
-            
+
             # Seller confirms handed over
             ('accepted', 'handed_over', order.seller): ('order.notify.delivered', order.seller),
-            
+
             # Buyer confirms completed
             ('handed_over', 'completed', order.buyer): ('order.notify.delivered', order.buyer),
-            
+
             # Either party cancels during handed_over
             ('handed_over', 'cancelled', order.buyer): ('order.notify.cancelled_by_buyer', order.buyer),
             ('handed_over', 'cancelled', order.seller): ('order.notify.cancelled_by_seller', order.seller),
         }
-        
+
         key = (old_status, new_status, user)
         if key in transitions:
             message_key, sender = transitions[key]
             send_order_notification(order, message_key, sender=sender)
-
-
-class ReviewViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
-    serializer_class = ReviewSerializer
-
-    def get_queryset(self):
-        user = self.request.user
-        return Review.objects.filter(Q(reviewer=user) | Q(reviewee=user)).order_by('-created_at')
-
-    def perform_create(self, serializer):
-        order = serializer.validated_data['order']
-        is_no_show = serializer.validated_data.get('is_no_show', False)
-        
-        # Validations
-        if self.request.user not in [order.buyer, order.seller]:
-            raise serializers.ValidationError({"detail": "You can only review your own orders."})
-            
-        if is_no_show and order.status != 'cancelled':
-            raise serializers.ValidationError({"detail": "No-show reports are only for cancelled orders."})
-            
-        if not is_no_show and order.status != 'completed':
-            raise serializers.ValidationError({"detail": "Reviews are only for completed orders."})
-            
-        reviewee = order.seller if self.request.user == order.buyer else order.buyer
-        
-        # Check if already reviewed
-        if Review.objects.filter(order=order, reviewer=self.request.user).exists():
-            raise serializers.ValidationError({"detail": "You have already reviewed this order."})
-            
-        serializer.save(
-            reviewer=self.request.user,
-            reviewee=reviewee
-        )
-
-

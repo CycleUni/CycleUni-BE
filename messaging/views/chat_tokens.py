@@ -1,177 +1,17 @@
+import datetime
 import hmac
 import logging
-import uuid
 
-from rest_framework import views, status, generics
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.exceptions import PermissionDenied, NotFound
-from messaging.models import Conversation
-from messaging.serializers import ConversationSerializer
-from listings.models import Listing
-from django.core.exceptions import ValidationError
-from django.db.models import OuterRef, Q, Subquery, F
-from django.utils import timezone
-from rest_framework_simplejwt.backends import TokenBackend
-import datetime
 from django.conf import settings
-from rest_framework.throttling import ScopedRateThrottle
+from django.core.exceptions import ValidationError
+from rest_framework import views, status
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.response import Response
+from rest_framework_simplejwt.backends import TokenBackend
 
-# Shared with listings/ rather than re-declared here — these were previously
-# a byte-for-byte copy of the listing upload helpers.
-from core.uploads import (
-    ALLOWED_CONTENT_TYPES,
-    MAX_UPLOAD_SIZE_BYTES,
-    detect_image_extension,
-    r2_client_and_options,
-)
+from messaging.models import Conversation
 
 logger = logging.getLogger(__name__)
-
-
-class ChatUploadURLView(views.APIView):
-    permission_classes = [IsAuthenticated]
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'upload'
-
-    def post(self, request):
-        conversation_id = request.data.get('conversation_id')
-        if not conversation_id:
-            return Response({"error": {"code": "msg.errConversationRequired"}}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            conversation = Conversation.objects.select_related('listing').get(id=conversation_id)
-        except (Conversation.DoesNotExist, ValidationError):
-            return Response({"error": "Conversation not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        if conversation.buyer_id != request.user.id and conversation.listing.seller_id != request.user.id:
-            return Response(status=status.HTTP_403_FORBIDDEN)
-
-        content_type = request.data.get('content_type')
-        ext = ALLOWED_CONTENT_TYPES.get(content_type)
-        if not ext:
-            return Response({"error": {"code": "listing.errUnsupportedFileType"}}, status=status.HTTP_400_BAD_REQUEST)
-
-        client, options = r2_client_and_options()
-        if client is None:
-            return Response({"mode": "direct"})
-
-        key = f"chat/{conversation_id}/{uuid.uuid4().hex}.{ext}"
-
-        upload_url = client.generate_presigned_url(
-            'put_object',
-            Params={
-                'Bucket': options["bucket_name"],
-                'Key': key,
-                'ContentType': content_type,
-            },
-            ExpiresIn=300,
-        )
-
-        protocol = options.get("url_protocol", "https:").rstrip(":")
-        photo_url = f"{protocol}://{options['custom_domain']}/{key}"
-
-        return Response({
-            "mode": "presigned_put",
-            "upload_url": upload_url,
-            "photo_url": photo_url,
-        })
-
-
-class ChatUploadDirectView(views.APIView):
-    permission_classes = [IsAuthenticated]
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'upload'
-
-    def post(self, request):
-        conversation_id = request.data.get('conversation_id')
-        if not conversation_id:
-            return Response({"error": {"code": "msg.errConversationRequired"}}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            conversation = Conversation.objects.select_related('listing').get(id=conversation_id)
-        except (Conversation.DoesNotExist, ValidationError):
-            return Response({"error": "Conversation not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        if conversation.buyer_id != request.user.id and conversation.listing.seller_id != request.user.id:
-            return Response(status=status.HTTP_403_FORBIDDEN)
-
-        from django.core.files.storage import default_storage
-
-        file = request.FILES.get('file')
-        if not file:
-            return Response({"error": {"code": "listing.errNoFile"}}, status=status.HTTP_400_BAD_REQUEST)
-
-        if file.size > MAX_UPLOAD_SIZE_BYTES:
-            return Response({"error": {"code": "listing.errFileTooLarge"}}, status=status.HTTP_400_BAD_REQUEST)
-
-        ext = detect_image_extension(file)
-        if not ext:
-            return Response({"error": {"code": "listing.errUnsupportedFileType"}}, status=status.HTTP_400_BAD_REQUEST)
-
-        filename = f"chat/{conversation_id}/{uuid.uuid4().hex}.{ext}"
-        path = default_storage.save(filename, file)
-        url = request.build_absolute_uri(default_storage.url(path))
-
-        return Response({"url": url})
-
-class ConversationListView(generics.ListAPIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class = ConversationSerializer
-
-    def get_queryset(self):
-        user = self.request.user
-        return Conversation.objects.filter(
-            Q(buyer=user) | Q(listing__seller=user)
-        ).exclude(
-            Q(buyer=user, buyer_deleted_at__isnull=False) |
-            Q(listing__seller=user, seller_deleted_at__isnull=False)
-        ).select_related('listing__book', 'listing__seller', 'buyer').order_by('-updated_at').distinct()
-
-    def post(self, request):
-        if not request.user.is_verified():
-            return Response({"error": {"code": "auth.errNotVerified"}}, status=status.HTTP_403_FORBIDDEN)
-            
-        listing_id = request.data.get('listing_id')
-        if not listing_id:
-            return Response({"error": "listing_id required"}, status=status.HTTP_400_BAD_REQUEST)
-        
-        try:
-            listing = Listing.objects.get(id=listing_id)
-            if listing.seller == request.user:
-                return Response({"error": "Cannot message yourself"}, status=status.HTTP_400_BAD_REQUEST)
-                
-            conv, created = Conversation.objects.get_or_create(
-                listing=listing,
-                buyer=request.user
-            )
-            serializer = ConversationSerializer(conv, context={'request': request})
-            return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
-        except Listing.DoesNotExist:
-            return Response({"error": "Listing not found"}, status=status.HTTP_404_NOT_FOUND)
-
-
-
-
-
-class ConversationDeleteView(views.APIView):
-    permission_classes = [IsAuthenticated]
-
-    def delete(self, request, conversation_id):
-        try:
-            conversation = Conversation.objects.select_related('listing').get(id=conversation_id)
-        except (Conversation.DoesNotExist, ValidationError):
-            return Response(status=status.HTTP_404_NOT_FOUND)
-
-        result = conversation.mark_deleted_by(request.user)
-        if result is False:
-            return Response(status=status.HTTP_403_FORBIDDEN)
-        # 'deleted' = both parties deleted, row is gone; 'hidden' = only one side
-        return Response({"status": result}, status=status.HTTP_200_OK)
-
-
-
-
 
 
 class ChatTokenView(views.APIView):
@@ -307,6 +147,3 @@ class EdgeChatWebhookView(views.APIView):
         except (Conversation.DoesNotExist, ValidationError):
             # ValidationError covers a malformed (non-UUID) room_id
             return Response({"error": "Conversation not found"}, status=status.HTTP_404_NOT_FOUND)
-
-
-

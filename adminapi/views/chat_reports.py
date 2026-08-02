@@ -1,0 +1,118 @@
+import logging
+import os
+import time
+
+import jwt
+
+from django.conf import settings
+from django.shortcuts import get_object_or_404
+from rest_framework import generics, status, views
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import IsAdminUser
+from rest_framework.response import Response
+
+from core.models import AuditEvent
+from moderation.models import ChatReport
+
+from ..serializers import AdminChatReportSerializer
+
+logger = logging.getLogger(__name__)
+
+
+class AdminChatReportListView(generics.ListAPIView):
+    """GET /api/v1/admin/chat-reports/ (read-only list)"""
+    permission_classes = [IsAdminUser]
+    serializer_class = AdminChatReportSerializer
+    pagination_class = PageNumberPagination
+
+    def get_queryset(self):
+        qs = ChatReport.objects.select_related(
+            'conversation', 'conversation__listing', 'conversation__listing__book',
+            'reporter', 'reported_party'
+        ).order_by('-created_at')
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param)
+        return qs
+
+
+class AdminChatReportDetailView(generics.RetrieveUpdateAPIView):
+    """GET / PATCH /api/v1/admin/chat-reports/<id>/"""
+    permission_classes = [IsAdminUser]
+    serializer_class = AdminChatReportSerializer
+    queryset = ChatReport.objects.select_related(
+        'conversation', 'conversation__listing', 'conversation__listing__book',
+        'reporter', 'reported_party'
+    ).all()
+    lookup_field = 'pk'
+    http_method_names = ['get', 'patch']
+
+    def patch(self, request, *args, **kwargs):
+        allowed_fields = {'status'}
+        extra = set(request.data.keys()) - allowed_fields
+        if extra:
+            return Response(
+                {"error": {"code": "admin.errForbiddenField"}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if 'status' not in request.data:
+            return Response(
+                {"error": {"code": "admin.errInvalidField"}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        new_status = request.data['status']
+        if new_status not in ('open', 'actioned', 'dismissed'):
+            return Response(
+                {"error": {"code": "admin.errInvalidStatus"}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        instance = self.get_object()
+        old_status = instance.status
+        instance.status = new_status
+        instance.save(update_fields=['status'])
+
+        AuditEvent.objects.create(
+            user=request.user,
+            kind='admin.chat_report_updated',
+            meta={
+                'chat_report_id': str(instance.id),
+                'old_status': old_status,
+                'new_status': new_status,
+            },
+        )
+
+        return Response(AdminChatReportSerializer(instance).data)
+
+
+class AdminChatReportTokenView(views.APIView):
+    """GET /api/v1/admin/chat-reports/<id>/chat-token/ — issue room-scoped JWT for admin message viewing."""
+    permission_classes = [IsAdminUser]
+
+    def get(self, request, pk):
+        chat_report = get_object_or_404(ChatReport.objects.select_related('conversation'), pk=pk)
+        conv = chat_report.conversation
+
+        edge_jwt_secret = os.getenv('EDGE_CHAT_JWT_SECRET', '')
+        if not edge_jwt_secret:
+            return Response(
+                {"error": {"code": "admin.chatNotConfigured"}},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        app_id = getattr(settings, 'EDGE_CHAT_APP_ID', 'cycleuni')
+        payload = {
+            'user_id': str(request.user.id),
+            'room_id': str(conv.id),
+            'app_id': app_id,
+            'exp': int(time.time()) + 300,
+        }
+        token = jwt.encode(payload, edge_jwt_secret, algorithm='HS256')
+
+        edge_chat_url = os.getenv('EDGE_CHAT_URL', '').strip('/')
+        return Response({
+            'token': token,
+            'edge_chat_url': edge_chat_url,
+            'room_id': str(conv.id),
+        })
