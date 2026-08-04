@@ -1,4 +1,5 @@
 from django.db import models
+from django.contrib.postgres.indexes import GinIndex
 
 class Book(models.Model):
     SOURCE_CHOICES = [
@@ -17,6 +18,15 @@ class Book(models.Model):
     cover_url = models.URLField(max_length=1024, blank=True)
     source = models.CharField(max_length=20, choices=SOURCE_CHOICES)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            GinIndex(
+                name='book_trgm_idx',
+                fields=['title', 'authors', 'isbn13'],
+                opclasses=['gin_trgm_ops', 'gin_trgm_ops', 'gin_trgm_ops']
+            )
+        ]
 
     def __str__(self):
         return f"{self.title} ({self.isbn13 or 'No ISBN'})"

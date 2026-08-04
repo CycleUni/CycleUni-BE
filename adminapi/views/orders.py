@@ -26,8 +26,10 @@ class AdminOrderListView(generics.ListAPIView):
         qs = Order.objects.select_related('buyer', 'seller', 'listing', 'listing__book').order_by('-created_at')
         q = self.request.query_params.get('q')
         if q:
+            q_clean = q.lstrip('#').strip()
             qs = qs.filter(
-                Q(buyer__email__icontains=q)
+                Q(id__icontains=q_clean)
+                | Q(buyer__email__icontains=q)
                 | Q(seller__email__icontains=q)
                 | Q(listing__book__title__icontains=q)
             )

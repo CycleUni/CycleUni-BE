@@ -122,7 +122,18 @@ class OrderViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        return Order.objects.filter(Q(buyer=user) | Q(seller=user)).order_by('-created_at')
+        qs = Order.objects.filter(Q(buyer=user) | Q(seller=user)).order_by('-created_at')
+        
+        q = self.request.query_params.get('q')
+        if q:
+            q_clean = q.lstrip('#').strip()
+            qs = qs.filter(
+                Q(id__icontains=q_clean) |
+                Q(listing__book__title__icontains=q) |
+                Q(listing__book__authors__icontains=q) |
+                Q(listing__book__isbn13__icontains=q)
+            )
+        return qs
 
     def _check_transition_permission(self, order, new_status, user):
         """Enforce who may trigger a given status transition (buyer/seller/either).

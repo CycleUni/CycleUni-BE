@@ -2,6 +2,8 @@ from rest_framework import views, status
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework.throttling import ScopedRateThrottle
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
 from catalog.services import (
     search_google_books, get_google_books_by_isbn,
     search_open_library_books, get_open_library_book_by_isbn,
@@ -114,7 +116,9 @@ class BookSearchView(views.APIView):
                         course_filter &= Q(listings__seller__school__name=school)
                     local_books = local_books.filter(course_filter)
                 
-                local_books = local_books.distinct()
+                # Limit local books to 100 to prevent memory explosion when merging
+                # with Google Books API results in Python.
+                local_books = local_books.distinct()[:100]
             
             local_results = []
             for book in local_books:
@@ -231,6 +235,7 @@ class CourseListView(views.APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'search'
 
+    @method_decorator(cache_page(60 * 60))
     def get(self, request):
         school = request.GET.get('school', '')
         category = request.GET.get('category', '')

@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 from django.db import models
 from django.conf import settings
 from django.core.files.storage import default_storage
+from django.contrib.postgres.indexes import GinIndex
 
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
@@ -58,6 +59,15 @@ class Listing(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            GinIndex(
+                name='listing_course_trgm_idx',
+                fields=['course_name'],
+                opclasses=['gin_trgm_ops']
+            )
+        ]
 
     def __str__(self):
         return f"Listing {self.id} for {self.book.title} by {self.seller.email}"

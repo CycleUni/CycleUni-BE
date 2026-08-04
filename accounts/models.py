@@ -1,5 +1,6 @@
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
+from django.contrib.postgres.indexes import GinIndex
 from django.utils import timezone
 
 
@@ -21,6 +22,15 @@ class School(models.Model):
 
     def __str__(self):
         return self.name
+
+    class Meta:
+        indexes = [
+            GinIndex(
+                name='school_trgm_idx',
+                fields=['name', 'email_domain'],
+                opclasses=['gin_trgm_ops', 'gin_trgm_ops']
+            )
+        ]
 
 
 
@@ -76,6 +86,15 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['first_name', 'last_name']
+
+    class Meta:
+        indexes = [
+            GinIndex(
+                name='user_trgm_idx',
+                fields=['email', 'first_name', 'last_name', 'edu_email'],
+                opclasses=['gin_trgm_ops', 'gin_trgm_ops', 'gin_trgm_ops', 'gin_trgm_ops']
+            )
+        ]
 
     def __str__(self):
         return self.email
