@@ -23,12 +23,13 @@ class BookSearchView(views.APIView):
     def get(self, request):
         query = request.GET.get('q', '')
         category = request.GET.get('category', '')
+        course = request.GET.get('course', '')
         school = request.GET.get('school', '')
         engine = request.GET.get('engine', 'google')
         if engine not in VALID_SEARCH_ENGINES:
             engine = 'google'
 
-        if not query and not category:
+        if not query and not category and not course:
             return Response([])
 
         # True only when a Google attempt was actually made and rate-limited
@@ -37,14 +38,19 @@ class BookSearchView(views.APIView):
         # temporarily unavailable") without guessing from per-item `source`.
         google_unavailable = False
 
-        if category:
-            base_filter = Q(listings__category__slug=category, listings__status='active')
+        if category or (course and not query):
+            base_filter = Q(listings__status='active')
+            if category:
+                base_filter &= Q(listings__category__slug=category)
+            if course:
+                base_filter &= Q(listings__course_name=course)
             if school:
-                base_filter &= Q(listings__school__name=school)
+                base_filter &= Q(listings__seller__school__name=school)
             books = Book.objects.filter(base_filter).distinct()
             results = []
             for book in books:
                 results.append({
+                    'id': str(book.id),
                     'isbn': book.isbn13,
                     'title': book.title,
                     'authors': book.authors,
@@ -92,15 +98,28 @@ class BookSearchView(views.APIView):
                 for gb_book in gb_results:
                     gb_book['source'] = 'google_api' if engine_used == 'google' else 'openlibrary_api'
                     gb_book['debug_source'] = debug_source
+                course_match = Q(listings__course_name__icontains=query, listings__status='active')
+                if school:
+                    course_match &= Q(listings__seller__school__name=school)
+
                 local_books = Book.objects.filter(
                     Q(title__icontains=query) | 
                     Q(authors__icontains=query) | 
-                    Q(isbn13__icontains=query)
-                ).distinct()
+                    Q(isbn13__icontains=query) |
+                    course_match
+                )
+                if course:
+                    course_filter = Q(listings__course_name=course, listings__status='active')
+                    if school:
+                        course_filter &= Q(listings__seller__school__name=school)
+                    local_books = local_books.filter(course_filter)
+                
+                local_books = local_books.distinct()
             
             local_results = []
             for book in local_books:
                 local_results.append({
+                    'id': str(book.id),
                     'isbn': book.isbn13,
                     'title': book.title,
                     'authors': book.authors,
@@ -114,8 +133,11 @@ class BookSearchView(views.APIView):
             results = []
             for item in local_results + gb_results:
                 isbn = item.get('isbn')
+                local_id = item.get('id')
                 if isbn and isbn not in seen_isbns:
                     seen_isbns.add(isbn)
+                    results.append(item)
+                elif not isbn and local_id:
                     results.append(item)
 
         from rest_framework.pagination import PageNumberPagination
@@ -126,29 +148,36 @@ class BookSearchView(views.APIView):
         # Enrich Google Books results with local data (activeListings, minPrice,
         # waitlistCount, id) in a fixed number of queries instead of per-item lookups.
         isbns = [item['isbn'] for item in results_to_process if item.get('isbn')]
+        ids = [item['id'] for item in results_to_process if item.get('id')]
         books_by_isbn = {}
-        if isbns:
-            active_filter = Q(listings__status='active')
+        books_by_id = {}
+        if isbns or ids:
+            global_active_filter = Q(listings__status='active')
+            local_active_filter = Q(listings__status='active')
             if school:
-                active_filter &= Q(listings__school__name=school)
+                local_active_filter &= Q(listings__seller__school__name=school)
 
-            books = Book.objects.filter(isbn13__in=isbns).annotate(
-                active_listings_count=Count(
-                    'listings', filter=active_filter, distinct=True
+            books = Book.objects.filter(Q(isbn13__in=isbns) | Q(id__in=ids)).annotate(
+                global_active_listings_count=Count(
+                    'listings', filter=global_active_filter, distinct=True
+                ),
+                local_active_listings_count=Count(
+                    'listings', filter=local_active_filter, distinct=True
                 ),
                 min_active_price=Min(
-                    'listings__price', filter=active_filter
+                    'listings__price', filter=global_active_filter
                 ),
                 waitlist_count=Count('subscriptions', distinct=True),
             )
-            books_by_isbn = {book.isbn13: book for book in books}
+            books_by_isbn = {book.isbn13: book for book in books if book.isbn13}
+            books_by_id = {str(book.id): book for book in books}
 
         # Distinct active-listing conditions per book, for the frontend condition filter
         conditions_by_book_id = {}
-        if books_by_isbn:
-            condition_filter = {'book_id__in': [book.id for book in books_by_isbn.values()], 'status': 'active'}
+        if books_by_id:
+            condition_filter = {'book_id__in': list(books_by_id.keys()), 'status': 'active'}
             if school:
-                condition_filter['school__name'] = school
+                condition_filter['seller__school__name'] = school
             condition_rows = Listing.objects.filter(**condition_filter).values_list('book_id', 'condition').distinct()
             for book_id, condition in condition_rows:
                 conditions_by_book_id.setdefault(book_id, []).append(condition)
@@ -164,7 +193,8 @@ class BookSearchView(views.APIView):
         enhanced_results = []
         for item in results_to_process:
             isbn = item.get('isbn')
-            book = books_by_isbn.get(isbn) if isbn else None
+            local_id = item.get('id')
+            book = books_by_id.get(local_id) or (books_by_isbn.get(isbn) if isbn else None)
             subscription_id = subscription_by_book_id.get(book.id) if book else None
 
             enhanced_results.append({
@@ -181,7 +211,8 @@ class BookSearchView(views.APIView):
                 # engine actually served this item, and whether it was a
                 # cache hit. Absent for locally-stored books.
                 'debug_source': item.get('debug_source'),
-                'activeListings': book.active_listings_count if book else 0,
+                'activeListings': book.global_active_listings_count if book else 0,
+                'localActiveListings': book.local_active_listings_count if book else 0,
                 'minPrice': (book.min_active_price or 0) if book else 0,
                 'waitlistCount': book.waitlist_count if book else 0,
                 'conditions': conditions_by_book_id.get(book.id, []) if book else [],
@@ -194,3 +225,25 @@ class BookSearchView(views.APIView):
             response.data['google_unavailable'] = google_unavailable
             return response
         return Response(enhanced_results)
+
+class CourseListView(views.APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'search'
+
+    def get(self, request):
+        school = request.GET.get('school', '')
+        category = request.GET.get('category', '')
+        
+        courses = Listing.objects.filter(status='active').exclude(course_name__exact='')
+        if school:
+            courses = courses.filter(seller__school__name=school)
+        if category:
+            courses = courses.filter(category__slug=category)
+        
+        course_counts = courses.values('course_name').annotate(
+            count=Count('id')
+        ).order_by('-count', 'course_name')[:20]
+        
+        results = [item['course_name'] for item in course_counts]
+        return Response(results)

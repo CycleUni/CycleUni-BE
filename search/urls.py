@@ -3,4 +3,5 @@ from search import views
 
 urlpatterns = [
     path('books/', views.BookSearchView.as_view(), name='search-books'),
+    path('courses/', views.CourseListView.as_view(), name='search-courses'),
 ]
