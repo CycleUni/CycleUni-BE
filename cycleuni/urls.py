@@ -13,7 +13,8 @@ urlpatterns = [
     path('api/v1/orders/', include('orders.urls')),
     path('api/v1/moderation/', include('moderation.urls')),
     path('api/v1/admin/', include('adminapi.urls')),
-    path('api/v1/ads/', include('ads.urls')),
+    # Renamed from 'ads/' to 'promotions/' to prevent adblockers from blocking internal banners
+    path('api/v1/promotions/', include('ads.urls')),
     path('api/cron/', include('cron.urls')),
     # HomeMetadataView depends on accounts.School and subscriptions.Subscription,
     # so it's wired directly at the project level to keep the core app dependency-free.

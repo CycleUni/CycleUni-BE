@@ -48,11 +48,12 @@ urlpatterns = [
     path('chat-reports/', AdminChatReportListView.as_view(), name='admin-chat-report-list'),
     path('chat-reports/<uuid:pk>/', AdminChatReportDetailView.as_view(), name='admin-chat-report-detail'),
     path('chat-reports/<uuid:pk>/chat-token/', AdminChatReportTokenView.as_view(), name='admin-chat-report-token'),
-    path('advertisers/', AdminAdvertiserListView.as_view(), name='admin-advertiser-list'),
-    path('advertisers/<int:pk>/', AdminAdvertiserDetailView.as_view(), name='admin-advertiser-detail'),
-    path('ads/', AdminAdListView.as_view(), name='admin-ad-list'),
+    # Routes renamed from 'advertisers/' and 'ads/' to 'sponsors/' and 'promotions/' to evade adblockers
+    path('sponsors/', AdminAdvertiserListView.as_view(), name='admin-advertiser-list'),
+    path('sponsors/<int:pk>/', AdminAdvertiserDetailView.as_view(), name='admin-advertiser-detail'),
+    path('promotions/', AdminAdListView.as_view(), name='admin-ad-list'),
     # NOTE: upload routes must be listed before <int:pk> to avoid any future routing ambiguity
-    path('ads/uploads/presign/', AdminAdUploadURLView.as_view(), name='admin-ad-upload-presign'),
-    path('ads/uploads/direct/', AdminAdUploadDirectView.as_view(), name='admin-ad-upload-direct'),
-    path('ads/<int:pk>/', AdminAdDetailView.as_view(), name='admin-ad-detail'),
+    path('promotions/uploads/presign/', AdminAdUploadURLView.as_view(), name='admin-ad-upload-presign'),
+    path('promotions/uploads/direct/', AdminAdUploadDirectView.as_view(), name='admin-ad-upload-direct'),
+    path('promotions/<int:pk>/', AdminAdDetailView.as_view(), name='admin-ad-detail'),
 ]
