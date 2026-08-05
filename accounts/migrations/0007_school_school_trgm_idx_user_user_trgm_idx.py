@@ -4,6 +4,8 @@ import django.contrib.postgres.indexes
 from django.db import migrations
 
 
+from django.contrib.postgres.operations import TrigramExtension
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -12,6 +14,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        TrigramExtension(),
         migrations.AddIndex(
             model_name='school',
             index=django.contrib.postgres.indexes.GinIndex(fields=['name', 'email_domain'], name='school_trgm_idx', opclasses=['gin_trgm_ops', 'gin_trgm_ops']),
