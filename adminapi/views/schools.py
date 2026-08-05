@@ -1,4 +1,5 @@
 import logging
+from django.db.models import Q
 
 from rest_framework import generics, status, views
 from rest_framework.pagination import PageNumberPagination
@@ -18,7 +19,16 @@ class AdminSchoolListView(generics.ListCreateAPIView):
     permission_classes = [IsAdminUser]
     serializer_class = AdminSchoolSerializer
     pagination_class = PageNumberPagination
-    queryset = School.objects.all().order_by('id')
+    
+    def get_queryset(self):
+        qs = School.objects.all().order_by('id')
+        q = self.request.query_params.get('q')
+        if q:
+            qs = qs.filter(
+                Q(name__icontains=q) |
+                Q(email_domain__icontains=q)
+            )
+        return qs
 
     def perform_create(self, serializer):
         serializer.save()

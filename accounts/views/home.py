@@ -1,5 +1,4 @@
 import logging
-
 from django.db.models import Count
 from rest_framework import views
 from rest_framework.permissions import AllowAny
@@ -75,13 +74,31 @@ class HomeMetadataView(views.APIView):
         # 2. Dynamic data (Most Wanted). Deliberately TTL-only in production —
         # see core.cache — so this TTL *is* the staleness window, kept short
         # while the dataset is small.
-        waitlist_cache_key = "home_waitlist"
-        waitlist = cache.get(waitlist_cache_key)
+        school_name = request.query_params.get('school')
+        school_id = None
+        invalid_school = False
+        if school_name:
+            try:
+                school_id = School.objects.values_list('id', flat=True).get(name=school_name)
+            except School.DoesNotExist:
+                invalid_school = True
 
-        if waitlist is None:
-            top_books = Subscription.objects.values('book__title').annotate(count=Count('user')).order_by('-count')[:7]
-            waitlist = [{"title": item['book__title'], "count": item['count']} for item in top_books]
-            cache.set(waitlist_cache_key, waitlist, timeout=HOME_WAITLIST_TTL)
+        if invalid_school:
+            waitlist = []
+        else:
+            if school_id is not None:
+                waitlist_cache_key = f"home_waitlist_{school_id}"
+            else:
+                waitlist_cache_key = "home_waitlist_all"
+            waitlist = cache.get(waitlist_cache_key)
+
+            if waitlist is None:
+                if school_id is not None:
+                    top_books = Subscription.objects.filter(user__school_id=school_id).values('book__title').annotate(count=Count('user')).order_by('-count')[:7]
+                else:
+                    top_books = Subscription.objects.values('book__title').annotate(count=Count('user')).order_by('-count')[:7]
+                waitlist = [{"title": item['book__title'], "count": item['count']} for item in top_books]
+                cache.set(waitlist_cache_key, waitlist, timeout=HOME_WAITLIST_TTL)
 
         # 3. Combine and return
         response_data = {

@@ -51,7 +51,7 @@ class Listing(models.Model):
     condition = models.CharField(max_length=20, choices=CONDITION_CHOICES)
     private_note = models.TextField(blank=True)
     description = models.TextField(blank=True)
-    photos = models.JSONField(default=list, help_text="完整照片網址陣列（R2 儲存後的公開 URL，見 ListingUploadURLView）")
+    photos = models.JSONField(default=list, help_text="Array of full photo URLs (public URLs after R2 storage, see ListingUploadURLView)")
     category = models.ForeignKey('core.Category', on_delete=models.SET_NULL, null=True, blank=True, related_name='listings')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
 

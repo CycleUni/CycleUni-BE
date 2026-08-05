@@ -176,6 +176,7 @@ INSTALLED_APPS = [
     "core",
     "adminapi",
     "cron",
+    "ads",
 ]
 
 MIDDLEWARE = [
@@ -323,6 +324,7 @@ REST_FRAMEWORK = {
         # Generous enough for a 6-photo listing plus edits, but bounded so a
         # logged-in account can't run up storage costs by looping uploads.
         'upload': '100/hour',
+        'ad_stats': '60/min',
     },
 }
 

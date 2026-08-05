@@ -12,6 +12,60 @@ from core.models import Category
 from listings.models import Listing
 from moderation.models import ChatReport
 from orders.models import Order
+from ads.models import Advertiser, Ad
+from ads.utils import promote_tmp_ad_photos
+from rest_framework.exceptions import ValidationError
+from core.uploads import storage_key_from_url
+
+
+class AdminAdvertiserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Advertiser
+        fields = '__all__'
+
+
+class AdminAdSerializer(serializers.ModelSerializer):
+    advertiser_name = serializers.CharField(source='advertiser.company_name', read_only=True)
+    is_internal_image = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Ad
+        fields = '__all__'
+
+    def get_is_internal_image(self, obj):
+        if not obj.image_url:
+            return False
+        request = self.context.get('request')
+        return bool(storage_key_from_url(obj.image_url, request))
+
+    def validate(self, data):
+        start_date = data.get('start_date') or (self.instance.start_date if self.instance else None)
+        end_date   = data.get('end_date')   or (self.instance.end_date   if self.instance else None)
+
+        if start_date and end_date and start_date >= end_date:
+            raise ValidationError({'end_date': '結束時間必須大於開始時間。'})
+        return data
+
+    def _resolve_image_url(self, image_url: str) -> str:
+        if image_url:
+            request = self.context.get('request')
+            if request and request.user.is_authenticated:
+                promoted = promote_tmp_ad_photos([image_url], request.user.id, request)
+                if promoted:
+                    return promoted[0]
+        return image_url
+
+    def create(self, validated_data):
+        image_url = validated_data.get('image_url')
+        if image_url:
+            validated_data['image_url'] = self._resolve_image_url(image_url)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        image_url = validated_data.get('image_url')
+        if image_url and image_url != instance.image_url:
+            validated_data['image_url'] = self._resolve_image_url(image_url)
+        return super().update(instance, validated_data)
 
 
 class AdminSchoolSerializer(serializers.ModelSerializer):

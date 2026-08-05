@@ -81,7 +81,9 @@ class RecentBooksView(views.APIView):
         page_param = request.query_params.get('page', '1')
 
         limit_param = request.query_params.get('limit', '200')
-        cache_key = f"recent_books_{lang}_{school}_{page_param}_{limit_param}"
+        import urllib.parse
+        safe_school = urllib.parse.quote(school)
+        cache_key = f"recent_books_{lang}_{safe_school}_{page_param}_{limit_param}"
         cached_data = cache.get(cache_key)
         if cached_data is not None:
             return Response(cached_data)

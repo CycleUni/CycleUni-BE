@@ -11,7 +11,7 @@ class School(models.Model):
     `translations`, keyed by language code:
     {"zh-TW": {"name": "國立台灣大學"}, "ja": {"name": "..."}}
     """
-    email_domain = models.CharField(max_length=255, unique=True, help_text="例如: ntu.edu.tw")
+    email_domain = models.CharField(max_length=255, unique=True, help_text="e.g.: ntu.edu.tw")
     name = models.CharField(max_length=255, help_text="Canonical English name, e.g. National Taiwan University")
     translations = models.JSONField(default=dict, blank=True, help_text='Localized fields per language, e.g. {"zh-TW": {"name": "國立台灣大學"}}')
 
@@ -65,15 +65,15 @@ class UserManager(BaseUserManager):
 
 class User(AbstractBaseUser, PermissionsMixin):
     """Custom user model keyed by email, linked to the user's school."""
-    email = models.EmailField(unique=True, help_text="註冊信箱，可為任意信箱")
-    edu_email = models.EmailField(null=True, blank=True, help_text="已驗證的校園信箱")
+    email = models.EmailField(unique=True, help_text="Registration email, can be any email")
+    edu_email = models.EmailField(null=True, blank=True, help_text="Verified campus email")
     school = models.ForeignKey(School, on_delete=models.SET_NULL, null=True, blank=True, related_name="users")
     first_name = models.CharField(max_length=150, default='')
     last_name = models.CharField(max_length=150, default='')
-    avatar_url = models.URLField(max_length=500, null=True, blank=True, help_text="頭貼網址")
+    avatar_url = models.URLField(max_length=500, null=True, blank=True, help_text="Avatar URL")
     
-    verified_at = models.DateTimeField(null=True, blank=True, help_text="首次通過 .edu.tw 驗證時間")
-    last_reverified_at = models.DateTimeField(null=True, blank=True, help_text="上一次重新驗證在校生身分的時間")
+    verified_at = models.DateTimeField(null=True, blank=True, help_text="Time of first successful .edu.tw verification")
+    last_reverified_at = models.DateTimeField(null=True, blank=True, help_text="Time of last student identity re-verification")
     
     last_seen_bought_orders_at = models.DateTimeField(null=True, blank=True, help_text="Timestamp of the most recent bought order seen by the user")
     last_seen_sold_orders_at = models.DateTimeField(null=True, blank=True, help_text="Timestamp of the most recent sold order seen by the user")
